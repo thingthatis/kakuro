@@ -687,42 +687,22 @@ function App() {
                     <p>The premium algebraic logic crossword</p>
                 </div>
                 <div className="header-controls">
-                    <div className="stat-item" style={{ fontSize: '0.8rem', background: 'transparent', padding: '0.2rem' }}>
-                        <span style={{ color: 'var(--text-secondary)' }}>Difficulty:</span>
+                    <label className="difficulty-control">
+                        <span>Difficulty</span>
                         <select
+                            aria-label="Difficulty"
                             value={difficulty}
                             onChange={e => {
                                 const diff = e.target.value as 'easy' | 'medium' | 'hard';
                                 setDifficulty(diff);
-                                // Direct inline board regeneration to ensure absolute synchronization and instant board overwrite
-                                const { board: newBoard } = generateKakuroPuzzle(diff);
-                                setBoard(newBoard);
-                                setSelectedCell(null);
-                                setTimer(0);
-                                setTimerActive(true);
-                                setHintsUsed(0);
-                                setUndoStack([]);
-                                setRedoStack([]);
-                                setIsWon(false);
-                                setShowVictoryModal(false);
-                                setErrors([]);
-                                setConfetti([]);
-                            }}
-                            style={{
-                                backgroundColor: '#181924',
-                                color: '#fff',
-                                border: '1px solid var(--border-light)',
-                                borderRadius: '0.4rem',
-                                padding: '0.3rem 0.5rem',
-                                fontWeight: 600,
-                                cursor: 'pointer',
+                                initGame(diff);
                             }}
                         >
                             <option value="easy">Easy</option>
                             <option value="medium">Medium</option>
                             <option value="hard">Hard</option>
                         </select>
-                    </div>
+                    </label>
 
                     <button className="btn btn-icon" onClick={() => setSoundEnabled(s => !s)} title="Toggle Sounds">
                         {soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}

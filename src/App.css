@@ -81,6 +81,37 @@ body {
   align-items: center;
 }
 
+.difficulty-control {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.difficulty-control select {
+  appearance: auto;
+  min-height: 2rem;
+  padding: 0.3rem 1.75rem 0.3rem 0.5rem;
+  color: var(--text-primary);
+  background-color: #181924;
+  border: 1px solid var(--border-light);
+  border-radius: 0.4rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.difficulty-control select:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.difficulty-control option {
+  color: var(--text-primary);
+  background-color: #181924;
+}
+
 /* Main Layout */
 .main-content {
   display: grid;
@@ -369,8 +400,8 @@ body {
 
 .clue-val.clue-right {
   position: absolute;
-  top: 4px;
-  right: 5px;
+  top: 8px;
+  right: 2px;
   text-align: right;
   color: #c084fc; /* light purple */
 }
@@ -404,8 +435,8 @@ body {
     font-size: 0.55rem;
   }
   .clue-val.clue-right {
-    top: 2px;
-    right: 3px;
+    top: 4px;
+    right: 1px;
   }
   .clue-val.clue-down {
     bottom: 2px;
