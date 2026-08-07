@@ -335,6 +335,87 @@ function tryGenerate(difficulty: 'easy' | 'medium' | 'hard'): {
     const solution: number[][] = Array.from({ length: h }, () => Array(w).fill(0));
     const runTargetSum = new Map<string, number>();
 
+    // Build clues by examining each run and placing the clue in the
+    // correct host black cell. Standard position: cell to the LEFT of
+    // the first white cell (for horizontal) or ABOVE the first white
+    // cell (for vertical). When the run starts at col 0 or row 0, fall
+    // back to the corner cell (above-left of the first white cell).
+    const clueHost = new Map<string, { clueRight?: number; clueDown?: number }>();
+
+    // Standard placement: every run gets a clue in the cell to the left
+    // (horizontal) or above (vertical) of its first white cell.
+    for (let r = 0; r < h; r++) {
+      for (let c = 0; c < w; c++) {
+        if (layout[r][c] !== 'B') continue;
+        if (c + 1 < w && layout[r][c + 1] === 'W') {
+          let sum = 0;
+          let tempC = c + 1;
+          while (tempC < w && layout[r][tempC] === 'W') {
+            sum += tempBoard[r][tempC] as number;
+            tempC++;
+          }
+          const existing = clueHost.get(`${r},${c}`) || {};
+          existing.clueRight = sum;
+          clueHost.set(`${r},${c}`, existing);
+          if (cellToHRun.get(`${r},${c + 1}`)) {
+            runTargetSum.set(`h:${r},${c}`, sum);
+          }
+        }
+        if (r + 1 < h && layout[r + 1][c] === 'W') {
+          let sum = 0;
+          let tempR = r + 1;
+          while (tempR < h && layout[tempR][c] === 'W') {
+            sum += tempBoard[tempR][c] as number;
+            tempR++;
+          }
+          const existing = clueHost.get(`${r},${c}`) || {};
+          existing.clueDown = sum;
+          clueHost.set(`${r},${c}`, existing);
+          if (cellToVRun.get(`${r + 1},${c}`)) {
+            runTargetSum.set(`v:${r},${c}`, sum);
+          }
+        }
+      }
+    }
+
+    // Edge case: a horizontal run starting at (r, 0) has no cell to its
+    // left. Place the clue in the cell at (r-1, 0), which is the corner
+    // cell above the first white cell.
+    for (let r = 0; r < h; r++) {
+      if (layout[r][0] === 'W' && r - 1 >= 0 && layout[r - 1][0] === 'B') {
+        let sum = 0;
+        let c = 0;
+        while (c < w && layout[r][c] === 'W') {
+          sum += tempBoard[r][c] as number;
+          c++;
+        }
+        const existing = clueHost.get(`${r - 1},0`) || {};
+        if (existing.clueRight === undefined) {
+          existing.clueRight = sum;
+          clueHost.set(`${r - 1},0`, existing);
+          if (cellToHRun.get(`${r},0`)) {
+            runTargetSum.set(`h:${r - 1},0`, sum);
+          }
+        }
+      }
+      if (layout[0][r] === 'W' && r - 1 >= 0 && layout[0][r - 1] === 'B') {
+        let sum = 0;
+        let rr = 0;
+        while (rr < h && layout[rr][r] === 'W') {
+          sum += tempBoard[rr][r] as number;
+          rr++;
+        }
+        const existing = clueHost.get(`0,${r - 1}`) || {};
+        if (existing.clueDown === undefined) {
+          existing.clueDown = sum;
+          clueHost.set(`0,${r - 1}`, existing);
+          if (cellToVRun.get(`0,${r}`)) {
+            runTargetSum.set(`v:0,${r - 1}`, sum);
+          }
+        }
+      }
+    }
+
     for (let r = 0; r < h; r++) {
       for (let c = 0; c < w; c++) {
         if (layout[r][c] === 'W') {
@@ -347,36 +428,12 @@ function tryGenerate(difficulty: 'easy' | 'medium' | 'hard'): {
             notes: [],
           };
         } else {
-          let clueRight: number | undefined;
-          let clueDown: number | undefined;
-
-          if (c + 1 < w && layout[r][c + 1] === 'W') {
-            let sum = 0;
-            let tempC = c + 1;
-            while (tempC < w && layout[r][tempC] === 'W') {
-              sum += tempBoard[r][tempC] as number;
-              tempC++;
-            }
-            clueRight = sum;
-            if (cellToHRun.get(`${r},${c + 1}`)) {
-              runTargetSum.set(`h:${r},${c}`, sum);
-            }
-          }
-
-          if (r + 1 < h && layout[r + 1][c] === 'W') {
-            let sum = 0;
-            let tempR = r + 1;
-            while (tempR < h && layout[tempR][c] === 'W') {
-              sum += tempBoard[tempR][c] as number;
-              tempR++;
-            }
-            clueDown = sum;
-            if (cellToVRun.get(`${r + 1},${c}`)) {
-              runTargetSum.set(`v:${r},${c}`, sum);
-            }
-          }
-
-          finalBoard[r][c] = { type: 'black', clueRight, clueDown };
+          const host = clueHost.get(`${r},${c}`);
+          finalBoard[r][c] = {
+            type: 'black',
+            clueRight: host?.clueRight,
+            clueDown: host?.clueDown,
+          };
         }
       }
     }

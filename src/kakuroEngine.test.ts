@@ -59,6 +59,67 @@ describe('generateKakuroPuzzle', () => {
       }
     }
   });
+
+  it('every horizontal run has a clue, including edge runs starting at column 0', () => {
+    for (let i = 0; i < 10; i++) {
+      const { board } = generateKakuroPuzzle('hard');
+      const h = board.length;
+      const w = board[0].length;
+      for (let r = 0; r < h; r++) {
+        for (let c = 0; c < w; c++) {
+          if (board[r][c].type !== 'white') continue;
+          // A cell is the start of a horizontal run if the cell to its left
+          // is either out of bounds or black AND the cell above is either
+          // out of bounds or black (otherwise the run actually starts above
+          // us, e.g. we're in a corner with white above and white to the left).
+          const leftIsBlackOrEdge = c === 0 || board[r][c - 1].type === 'black';
+          const upIsBlackOrEdge = r === 0 || board[r - 1][c].type === 'black';
+          if (!leftIsBlackOrEdge || !upIsBlackOrEdge) continue;
+          // The horizontal run starts at (r, c) if c === 0 or left is black.
+          // For a normal run (c > 0), the host is (r, c-1). For an edge run
+          // (c === 0 and r > 0), the host is (r-1, 0).
+          let hostHasClue = false;
+          if (c > 0) {
+            const host = board[r][c - 1] as BlackCell;
+            if (host.type === 'black' && host.clueRight !== undefined) hostHasClue = true;
+          } else if (r > 0) {
+            const host = board[r - 1][0] as BlackCell;
+            if (host.type === 'black' && host.clueRight !== undefined) hostHasClue = true;
+          } else {
+            hostHasClue = true; // (0, 0) — out of scope
+          }
+          expect(hostHasClue).toBe(true);
+        }
+      }
+    }
+  });
+
+  it('every vertical run has a clue, including edge runs starting at row 0', () => {
+    for (let i = 0; i < 10; i++) {
+      const { board } = generateKakuroPuzzle('hard');
+      const h = board.length;
+      const w = board[0].length;
+      for (let c = 0; c < w; c++) {
+        for (let r = 0; r < h; r++) {
+          if (board[r][c].type !== 'white') continue;
+          const upIsBlackOrEdge = r === 0 || board[r - 1][c].type === 'black';
+          const leftIsBlackOrEdge = c === 0 || board[r][c - 1].type === 'black';
+          if (!upIsBlackOrEdge || !leftIsBlackOrEdge) continue;
+          let hostHasClue = false;
+          if (r > 0) {
+            const host = board[r - 1][c] as BlackCell;
+            if (host.type === 'black' && host.clueDown !== undefined) hostHasClue = true;
+          } else if (c > 0) {
+            const host = board[0][c - 1] as BlackCell;
+            if (host.type === 'black' && host.clueDown !== undefined) hostHasClue = true;
+          } else {
+            hostHasClue = true; // (0, 0)
+          }
+          expect(hostHasClue).toBe(true);
+        }
+      }
+    }
+  });
 });
 
 describe('checkWinCondition', () => {
