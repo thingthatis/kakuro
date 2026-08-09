@@ -63,6 +63,7 @@ src/
 │   └── ConfirmDialog.tsx
 └── hooks/
     ├── useAudio.ts      # Single shared AudioContext
+    ├── useFocusTrap.ts  # Modal focus trap + Escape-to-close
     ├── usePartitions.ts # Cached partition enumerator (for combination hints)
     └── useRunStatus.ts  # Memoized run boundaries
 ```
@@ -71,29 +72,73 @@ The engine in `kakuroEngine.ts` is pure TypeScript with no React or DOM
 dependencies, which makes it straightforward to unit-test. It exports:
 
 - `generateKakuroPuzzle(difficulty)` — produces a fresh board, solution, and
-  pre-reveal map. Easy and medium puzzles pre-fill ~25% / ~10% of cells.
+  pre-reveal map. Every returned puzzle is guaranteed to have **exactly one
+  solution** (see below).
 - `checkWinCondition(board)` — validates every horizontal and vertical run
   and reports both win state and the coordinates of any cells in conflict.
 - `getRunStatus(board, r, c, direction)` — current sum, target sum, completion
   and overflow status for the run containing a given white cell.
-- `countSolutions(board, ...)` — exported for users who want to verify that
-  a generated puzzle has a unique solution. Note: the fixed layout templates
-  are small enough that many generated puzzles admit multiple solutions; the
-  engine intentionally does not enforce uniqueness as a hard gate because the
-  check is expensive for these small boards. Call `countSolutions` directly
-  if you need that property.
+- `computeClueStatuses(board)` — per-run completion state for every clue cell
+  in a single pass, so the UI does not re-walk each run on every render.
+- `countSolutions(board, ...)` — counts solutions up to a cap of 2. Bounded by
+  a node budget; if the budget is exhausted it reports "not unique" rather
+  than claiming a uniqueness it did not prove.
+- `generateLayout(spec)` / `validateLayout(layout, maxRun)` — layout
+  construction and its invariant check.
+- `buildRunIndex(board)` — rebuilds the run lookup maps for a board that came
+  from storage rather than fresh generation.
 
-## Difficulty
+## Puzzle generation
 
-The engine ships with three hand-tuned layout templates — a 6×6 easy, an 8×8
-medium, and a 10×10 hard. Each is randomly rotated/mirrored before solving,
-which yields structurally different boards on every generation.
+Layouts are generated procedurally rather than from fixed templates. Two
+invariants make the rest of the engine sound:
+
+1. **Row 0 and column 0 are always black.** Every run therefore begins at
+   index ≥ 1 and is guaranteed a black host cell immediately above or to the
+   left of its first white cell — which is where its clue is printed. Without
+   this, a run can exist with nowhere to put its clue, and an unclued run is
+   never validated, so a wrong answer can be accepted as a win.
+2. **Every run has length between 2 and `maxRun`** (never more than 9, since a
+   run holds distinct digits 1–9). Length-1 runs are trivially forced by their
+   own clue and are considered poor construction.
+
+The layout is solved as a constraint satisfaction problem — assign black/white
+in row-major order and backtrack on conflict. Rejection sampling was measured
+at 0 valid grids in 2000 attempts for an 11×11, so random scatter is not
+viable; greedy repair deadlocks because splitting a long run can strand a
+length-1 run perpendicular to it.
+
+Uniqueness is enforced by **digging holes**, not by adding givens: the grid
+starts fully solved and cells are removed one at a time, keeping a removal only
+if exactly one solution survives. This ordering matters for speed —
+`countSolutions` costs ~1s on an empty 11×11 but under a millisecond once the
+board is ~40% filled, so every check stays in the cheap regime.
+
+| Difficulty | Grid | Max run | Typical generation |
+| ---------- | ---- | ------- | ------------------ |
+| easy       | 7×7  | 4       | ~1 ms              |
+| medium     | 9×9  | 5       | ~35 ms             |
+| hard       | 11×11| 6       | ~290 ms            |
 
 ## Persistence
 
-The current game state (board, timer, hints used, difficulty) is written to
-`localStorage` on every change and restored on the next page load. Best times
-and total wins are tracked per difficulty in a separate `kakuro:stats:v1` key.
+The board, settings, hints used, and difficulty are written to `localStorage`
+whenever they change. The elapsed timer is patched separately on a 5-second
+cadence via `patchSavedTimer`, so the clock survives a refresh without
+re-serialising the whole board once per second. Best times and total wins are
+tracked per difficulty under `kakuro:stats:v1`.
+
+## Accessibility
+
+- Grid cells use `role="gridcell"` with labels describing position, value, and
+  whether a cell is a read-only given or in conflict.
+- The grid uses a **roving tabindex**: only the selected cell is tabbable and
+  it holds DOM focus, keeping Tab navigation and screen-reader position in sync
+  with the game's own selection.
+- Modals set `aria-modal`, trap Tab focus, close on `Escape`, and restore focus
+  to the previously focused element on unmount.
+- All animation is disabled under `prefers-reduced-motion: reduce`, and the
+  confetti particles are not even created.
 
 ## Testing
 
@@ -103,11 +148,23 @@ npm run test
 
 Tests live next to the code they cover:
 
-- `kakuroEngine.test.ts` — generation invariants, win-condition edge cases
+- `kakuroEngine.test.ts` — layout invariants, generation guarantees (no orphan
+  clues, every run clued, clues match the solution, exactly one solution), and
+  win-condition edge cases
+- `App.test.tsx` — mounts the whole app: play, undo, difficulty persistence,
+  modal behaviour
+- `components/GameBoard.test.tsx` — cell labelling, roving tabindex, focus trap
 - `hooks/usePartitions.test.ts` — partition enumerator
 - `storage.test.ts` — localStorage round-trip
 
-The tests run in `jsdom` (via Vitest) and complete in well under a second.
+Test config lives in `vite.config.ts` (not a separate `vitest.config.ts`) so
+tests run through the same pipeline as the app, which is what makes the
+component tests possible.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs lint, test, and build on Node 20 and 22 for
+every push and pull request to `main`.
 
 ## License
 
