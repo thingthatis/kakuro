@@ -75,10 +75,10 @@ function generatePuzzleWithPreRevealed(diff: Difficulty): { board: Board; preRev
     return { board, preRevealed };
 }
 
-function findFirstPlayableCell(board: Board): { r: number; c: number } | null {
+function findFirstPlayableCell(board: Board, preRevealed: boolean[][]): { r: number; c: number } | null {
     for (let r = 0; r < board.length; r += 1) {
         for (let c = 0; c < board[r].length; c += 1) {
-            if (board[r][c].type === 'white') return { r, c };
+            if (board[r][c].type === 'white' && !preRevealed[r]?.[c]) return { r, c };
         }
     }
     return null;
@@ -116,7 +116,7 @@ function App() {
     const [board, setBoard] = useState<Board>(initial.board);
     const [preRevealed, setPreRevealed] = useState<boolean[][]>(initial.preRevealed);
     const [selectedCell, setSelectedCell] = useState<{ r: number; c: number } | null>(() =>
-        findFirstPlayableCell(initial.board)
+        findFirstPlayableCell(initial.board, initial.preRevealed)
     );
     const [editDirection, setEditDirection] = useState<'h' | 'v'>(initial.editDirection);
     const [pencilMode, setPencilMode] = useState<boolean>(initial.pencilMode);
@@ -180,7 +180,7 @@ function App() {
             const { board: newBoard, preRevealed: newPre } = generatePuzzleWithPreRevealed(diff);
             setBoard(newBoard);
             setPreRevealed(newPre);
-            setSelectedCell(findFirstPlayableCell(newBoard));
+            setSelectedCell(findFirstPlayableCell(newBoard, newPre));
             setTimer(0);
             setTimerActive(true);
             setHintsUsed(0);
