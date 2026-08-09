@@ -1,5 +1,7 @@
 // Kakuro Puzzle Engine and Generator
 
+import type { Difficulty } from './types';
+
 export interface BlackCell {
   type: 'black';
   clueRight?: number;
@@ -19,77 +21,204 @@ export type Board = Cell[][];
 interface Coord { r: number; c: number }
 export type Direction = 'h' | 'v';
 
-const LAYOUT_TEMPLATES: Record<string, string[]> = {
-  easy: [
-    'B B B B B B',
-    'B W W B W W',
-    'B W W W W W',
-    'B B W W B B',
-    'B W W W W W',
-    'B W W B W W',
-  ],
-  medium: [
-    'B B B B B B B B',
-    'B W W W B W W W',
-    'B W W W W W W W',
-    'B B W W W W B B',
-    'B B W W W W B B',
-    'B W W W W W W W',
-    'B W W W B W W W',
-    'B B B B B B B B',
-  ],
-  hard: [
-    'B B B B B B B B B B',
-    'B W W W B B W W W B',
-    'B W W W W B W W W W',
-    'B W W W W W W B W W',
-    'B B B W W W W B B B',
-    'B B B W W W W B B B',
-    'B W W B W W W W W W',
-    'B W W W W B W W W W',
-    'B W W W B B W W W B',
-    'B B B B B B B B B B',
-  ],
-};
-
-function shuffle<T>(array: T[]): T[] {
-  for (let i = array.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [array[i], array[j]] = [array[j], array[i]];
-  }
-  return array;
+/**
+ * Layout generation parameters per difficulty.
+ *
+ * `size` includes the clue border. Row 0 and column 0 are always black
+ * because they host the clues for every run that starts at index 1 — see
+ * `generateLayout` for why that invariant is load-bearing.
+ *
+ * `maxRun` is capped at 9 in all cases: a run holds distinct digits 1-9,
+ * so a run longer than 9 cells is unsatisfiable.
+ */
+export interface LayoutSpec {
+  size: number;
+  blackRatio: number;
+  maxRun: number;
 }
 
-function randomizeLayout(template: string[]): string[][] {
-  const rows = template.length;
-  const cols = template[0].split(' ').length;
-  let grid: string[][] = template.map(row => row.split(' '));
+const DIFFICULTY_SPECS: Record<Difficulty, LayoutSpec> = {
+  easy: { size: 7, blackRatio: 0.2, maxRun: 4 },
+  medium: { size: 9, blackRatio: 0.26, maxRun: 5 },
+  hard: { size: 11, blackRatio: 0.3, maxRun: 6 },
+};
 
-  const numTransforms = Math.floor(Math.random() * 6);
-  for (let t = 0; t < numTransforms; t++) {
-    const op = Math.floor(Math.random() * 4);
-    if (op === 0) {
-      grid = grid.map(row => [...row].reverse());
-    } else if (op === 1) {
-      grid = [...grid].reverse();
-    } else if (op === 2) {
-      const newGrid: string[][] = [];
-      for (let c = 0; c < cols; c++) {
-        const newRow: string[] = [];
-        for (let r = rows - 1; r >= 0; r--) newRow.push(grid[r][c]);
-        newGrid.push(newRow);
-      }
-      grid = newGrid;
-    } else {
-      const newGrid: string[][] = [];
-      for (let c = cols - 1; c >= 0; c--) {
-        const newRow: string[] = [];
-        for (let r = 0; r < rows; r++) newRow.push(grid[r][c]);
-        newGrid.push(newRow);
-      }
-      grid = newGrid;
-    }
+const ABSOLUTE_MAX_RUN = 9;
+const MIN_RUN = 2;
+
+/**
+ * Search budget for the per-removal uniqueness check while digging holes.
+ * Deliberately small: a removal that cannot be proven safe quickly is simply
+ * not made, which costs a little difficulty but keeps generation snappy.
+ */
+const DIG_NODE_BUDGET = 20000;
+
+function shuffle<T>(array: readonly T[]): T[] {
+  const copy = [...array];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
   }
+  return copy;
+}
+
+/**
+ * Enumerates every maximal horizontal and vertical white run in a layout.
+ * A "run" is a maximal straight sequence of white cells.
+ */
+function enumerateRuns(layout: string[][]): { hRuns: Coord[][]; vRuns: Coord[][] } {
+  const h = layout.length;
+  const w = layout[0].length;
+  const hRuns: Coord[][] = [];
+  const vRuns: Coord[][] = [];
+
+  for (let r = 0; r < h; r++) {
+    let current: Coord[] = [];
+    for (let c = 0; c < w; c++) {
+      if (layout[r][c] === 'W') {
+        current.push({ r, c });
+      } else if (current.length > 0) {
+        hRuns.push(current);
+        current = [];
+      }
+    }
+    if (current.length > 0) hRuns.push(current);
+  }
+
+  for (let c = 0; c < w; c++) {
+    let current: Coord[] = [];
+    for (let r = 0; r < h; r++) {
+      if (layout[r][c] === 'W') {
+        current.push({ r, c });
+      } else if (current.length > 0) {
+        vRuns.push(current);
+        current = [];
+      }
+    }
+    if (current.length > 0) vRuns.push(current);
+  }
+
+  return { hRuns, vRuns };
+}
+
+/**
+ * Checks the structural invariants a playable Kakuro layout must satisfy.
+ *
+ * 1. Row 0 and column 0 are entirely black. Every run therefore starts at
+ *    index >= 1 and is guaranteed a black host cell immediately above/left
+ *    of its first white cell, which is where its clue lives. Without this
+ *    guarantee a run can exist with nowhere to print its clue, leaving it
+ *    silently unvalidated.
+ * 2. No run is shorter than MIN_RUN. Length-1 runs are trivially determined
+ *    by their own clue and are considered poor puzzle construction.
+ * 3. No run is longer than `maxRun` (and never longer than 9, since a run
+ *    holds distinct digits 1-9).
+ * 4. At least one white cell exists.
+ */
+export function validateLayout(layout: string[][], maxRun = ABSOLUTE_MAX_RUN): boolean {
+  const h = layout.length;
+  const w = layout[0].length;
+  if (h < 2 || w < 2) return false;
+
+  for (let c = 0; c < w; c++) {
+    if (layout[0][c] !== 'B') return false;
+  }
+  for (let r = 0; r < h; r++) {
+    if (layout[r][0] !== 'B') return false;
+  }
+
+  const cap = Math.min(maxRun, ABSOLUTE_MAX_RUN);
+  const { hRuns, vRuns } = enumerateRuns(layout);
+  if (hRuns.length === 0 || vRuns.length === 0) return false;
+
+  for (const run of [...hRuns, ...vRuns]) {
+    if (run.length < MIN_RUN) return false;
+    if (run.length > cap) return false;
+  }
+
+  return true;
+}
+
+/**
+ * Procedurally builds a layout for the given spec.
+ *
+ * Neither rejection sampling nor greedy repair works here. Random scatter
+ * essentially never satisfies the run-length bounds on a large grid, and
+ * greedy splitting deadlocks because splitting a long run can strand a
+ * length-1 run in the perpendicular direction.
+ *
+ * So the layout is solved as a constraint satisfaction problem: assign
+ * B/W to each interior cell in row-major order under the invariants
+ * (every run length in [MIN_RUN, cap]), backtracking on conflict. The
+ * digit order is shuffled per cell and biased by `blackRatio`, which
+ * yields a different valid grid each call.
+ */
+export function generateLayout(spec: LayoutSpec, nodeBudget = 200000): string[][] | null {
+  const n = spec.size;
+  const cap = Math.min(spec.maxRun, ABSOLUTE_MAX_RUN);
+  if (n < 2 + MIN_RUN) return null;
+
+  const grid: string[][] = Array.from({ length: n }, () => Array(n).fill('B'));
+  const cells: Coord[] = [];
+  for (let r = 1; r < n; r++) {
+    for (let c = 1; c < n; c++) cells.push({ r, c });
+  }
+
+  /** Length of the white run ending immediately before (r, c). */
+  const trailingH = (r: number, c: number): number => {
+    let len = 0;
+    let cc = c - 1;
+    while (cc >= 1 && grid[r][cc] === 'W') { len++; cc--; }
+    return len;
+  };
+  const trailingV = (r: number, c: number): number => {
+    let len = 0;
+    let rr = r - 1;
+    while (rr >= 1 && grid[rr][c] === 'W') { len++; rr--; }
+    return len;
+  };
+
+  let nodes = 0;
+
+  const assign = (index: number): boolean => {
+    if (nodes++ > nodeBudget) return false;
+    if (index === cells.length) return true;
+
+    const { r, c } = cells[index];
+    const isLastCol = c === n - 1;
+    const isLastRow = r === n - 1;
+
+    // Bias the attempt order by blackRatio so grids vary in density.
+    const tryBlackFirst = Math.random() < spec.blackRatio;
+    const order: string[] = tryBlackFirst ? ['B', 'W'] : ['W', 'B'];
+
+    for (const value of order) {
+      const hBefore = trailingH(r, c);
+      const vBefore = trailingV(r, c);
+
+      if (value === 'B') {
+        // Closing a run: it must be absent or long enough.
+        if (hBefore !== 0 && hBefore < MIN_RUN) continue;
+        if (vBefore !== 0 && vBefore < MIN_RUN) continue;
+      } else {
+        // Extending a run: it must not overrun the cap.
+        if (hBefore + 1 > cap) continue;
+        if (vBefore + 1 > cap) continue;
+        // A run that ends at the grid edge must still be long enough.
+        if (isLastCol && hBefore + 1 < MIN_RUN) continue;
+        if (isLastRow && vBefore + 1 < MIN_RUN) continue;
+      }
+
+      grid[r][c] = value;
+      if (assign(index + 1)) return true;
+      grid[r][c] = 'B';
+    }
+
+    return false;
+  };
+
+  if (!assign(0)) return null;
+  if (!validateLayout(grid, spec.maxRun)) return null;
   return grid;
 }
 
@@ -204,32 +333,36 @@ function isRunWithinRange(
 }
 
 /**
- * Generates and returns a valid solved Kakuro board structure
- * with randomized values, calculated clues, and pre-reveal metadata.
+ * Generates a Kakuro puzzle that is guaranteed to have exactly one solution.
+ *
+ * Uniqueness is enforced, not assumed: after laying out the grid and solving
+ * it, `countSolutions` is consulted and cells are revealed until only one
+ * solution remains. Difficulty then adds further reveals on top.
  */
-export function generateKakuroPuzzle(difficulty: 'easy' | 'medium' | 'hard'): {
+export function generateKakuroPuzzle(difficulty: Difficulty): {
   board: Board;
   solution: number[][];
   preRevealed: boolean[][];
 } {
-  const MAX_OUTER = 5;
+  const MAX_OUTER = 25;
   for (let attempt = 0; attempt < MAX_OUTER; attempt++) {
     const result = tryGenerate(difficulty);
     if (result) return result;
-    console.warn(`Kakuro generator attempt ${attempt + 1} failed; retrying.`);
   }
   throw new Error(
     `Kakuro generator could not produce a valid puzzle in ${MAX_OUTER} attempts.`
   );
 }
 
-function tryGenerate(difficulty: 'easy' | 'medium' | 'hard'): {
+function tryGenerate(difficulty: Difficulty): {
   board: Board;
   solution: number[][];
   preRevealed: boolean[][];
 } | null {
-  const template = LAYOUT_TEMPLATES[difficulty] || LAYOUT_TEMPLATES.easy;
-  const layout = randomizeLayout(template);
+  const spec = DIFFICULTY_SPECS[difficulty] ?? DIFFICULTY_SPECS.easy;
+  const layout = generateLayout(spec);
+  if (!layout) return null;
+
   const h = layout.length;
   const w = layout[0].length;
 
@@ -237,34 +370,7 @@ function tryGenerate(difficulty: 'easy' | 'medium' | 'hard'): {
     Array.from({ length: w }, (_, c) => (layout[r][c] === 'B' ? 'B' : 0))
   );
 
-  const hRuns: Coord[][] = [];
-  const vRuns: Coord[][] = [];
-
-  for (let r = 0; r < h; r++) {
-    let currentRun: Coord[] = [];
-    for (let c = 0; c < w; c++) {
-      if (layout[r][c] === 'W') {
-        currentRun.push({ r, c });
-      } else if (currentRun.length > 0) {
-        hRuns.push(currentRun);
-        currentRun = [];
-      }
-    }
-    if (currentRun.length > 0) hRuns.push(currentRun);
-  }
-
-  for (let c = 0; c < w; c++) {
-    let currentRun: Coord[] = [];
-    for (let r = 0; r < h; r++) {
-      if (layout[r][c] === 'W') {
-        currentRun.push({ r, c });
-      } else if (currentRun.length > 0) {
-        vRuns.push(currentRun);
-        currentRun = [];
-      }
-    }
-    if (currentRun.length > 0) vRuns.push(currentRun);
-  }
+  const { hRuns, vRuns } = enumerateRuns(layout);
 
   const cellToHRun = new Map<string, Coord[]>();
   const cellToVRun = new Map<string, Coord[]>();
@@ -317,154 +423,111 @@ function tryGenerate(difficulty: 'easy' | 'medium' | 'hard'): {
     return false;
   }
 
-  // Try several first-solutions and keep the first one whose resulting
-  // puzzle has at most a small number of valid solutions. The fixed layout
-  // templates are too small to guarantee uniqueness for every digit
-  // assignment, so we accept a small number of alternative solutions.
-  const INTERNAL_RETRIES = 1;
-  let chosenFinalBoard: Board | null = null;
-  for (let internal = 0; internal < INTERNAL_RETRIES && !chosenFinalBoard; internal++) {
-    for (let r = 0; r < h; r++) {
-      for (let c = 0; c < w; c++) {
-        if (tempBoard[r][c] !== 'B') tempBoard[r][c] = 0;
-      }
-    }
-    if (!solve(0)) continue;
+  if (!solve(0)) return null;
 
-    const finalBoard: Board = Array.from({ length: h }, () => []);
-    const solution: number[][] = Array.from({ length: h }, () => Array(w).fill(0));
-    const runTargetSum = new Map<string, number>();
+  // Derive clues from the solved grid. Because row 0 and column 0 are black
+  // (see validateLayout), the cell immediately left of / above the first
+  // white cell of every run is guaranteed to exist and be black, so this
+  // single pass places every clue. No edge-case fixups are needed.
+  const runTargetSum = new Map<string, number>();
+  const clueHost = new Map<string, { clueRight?: number; clueDown?: number }>();
 
-    // Build clues by examining each run and placing the clue in the
-    // correct host black cell. Standard position: cell to the LEFT of
-    // the first white cell (for horizontal) or ABOVE the first white
-    // cell (for vertical). When the run starts at col 0 or row 0, fall
-    // back to the corner cell (above-left of the first white cell).
-    const clueHost = new Map<string, { clueRight?: number; clueDown?: number }>();
-
-    // Standard placement: every run gets a clue in the cell to the left
-    // (horizontal) or above (vertical) of its first white cell.
-    for (let r = 0; r < h; r++) {
-      for (let c = 0; c < w; c++) {
-        if (layout[r][c] !== 'B') continue;
-        if (c + 1 < w && layout[r][c + 1] === 'W') {
-          let sum = 0;
-          let tempC = c + 1;
-          while (tempC < w && layout[r][tempC] === 'W') {
-            sum += tempBoard[r][tempC] as number;
-            tempC++;
-          }
-          const existing = clueHost.get(`${r},${c}`) || {};
-          existing.clueRight = sum;
-          clueHost.set(`${r},${c}`, existing);
-          if (cellToHRun.get(`${r},${c + 1}`)) {
-            runTargetSum.set(`h:${r},${c}`, sum);
-          }
-        }
-        if (r + 1 < h && layout[r + 1][c] === 'W') {
-          let sum = 0;
-          let tempR = r + 1;
-          while (tempR < h && layout[tempR][c] === 'W') {
-            sum += tempBoard[tempR][c] as number;
-            tempR++;
-          }
-          const existing = clueHost.get(`${r},${c}`) || {};
-          existing.clueDown = sum;
-          clueHost.set(`${r},${c}`, existing);
-          if (cellToVRun.get(`${r + 1},${c}`)) {
-            runTargetSum.set(`v:${r},${c}`, sum);
-          }
-        }
-      }
-    }
-
-    // Edge case: a horizontal run starting at (r, 0) has no cell to its
-    // left. Place the clue in the cell at (r-1, 0), which is the corner
-    // cell above the first white cell.
-    for (let r = 0; r < h; r++) {
-      if (layout[r][0] === 'W' && r - 1 >= 0 && layout[r - 1][0] === 'B') {
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < w; c++) {
+      if (layout[r][c] !== 'B') continue;
+      if (c + 1 < w && layout[r][c + 1] === 'W') {
         let sum = 0;
-        let c = 0;
-        while (c < w && layout[r][c] === 'W') {
-          sum += tempBoard[r][c] as number;
-          c++;
+        let tempC = c + 1;
+        while (tempC < w && layout[r][tempC] === 'W') {
+          sum += tempBoard[r][tempC] as number;
+          tempC++;
         }
-        const existing = clueHost.get(`${r - 1},0`) || {};
-        if (existing.clueRight === undefined) {
-          existing.clueRight = sum;
-          clueHost.set(`${r - 1},0`, existing);
-          if (cellToHRun.get(`${r},0`)) {
-            runTargetSum.set(`h:${r - 1},0`, sum);
-          }
-        }
+        const existing = clueHost.get(`${r},${c}`) || {};
+        existing.clueRight = sum;
+        clueHost.set(`${r},${c}`, existing);
+        runTargetSum.set(`h:${r},${c}`, sum);
       }
-      if (layout[0][r] === 'W' && r - 1 >= 0 && layout[0][r - 1] === 'B') {
+      if (r + 1 < h && layout[r + 1][c] === 'W') {
         let sum = 0;
-        let rr = 0;
-        while (rr < h && layout[rr][r] === 'W') {
-          sum += tempBoard[rr][r] as number;
-          rr++;
+        let tempR = r + 1;
+        while (tempR < h && layout[tempR][c] === 'W') {
+          sum += tempBoard[tempR][c] as number;
+          tempR++;
         }
-        const existing = clueHost.get(`0,${r - 1}`) || {};
-        if (existing.clueDown === undefined) {
-          existing.clueDown = sum;
-          clueHost.set(`0,${r - 1}`, existing);
-          if (cellToVRun.get(`0,${r}`)) {
-            runTargetSum.set(`v:0,${r - 1}`, sum);
-          }
-        }
+        const existing = clueHost.get(`${r},${c}`) || {};
+        existing.clueDown = sum;
+        clueHost.set(`${r},${c}`, existing);
+        runTargetSum.set(`v:${r},${c}`, sum);
       }
     }
-
-    for (let r = 0; r < h; r++) {
-      for (let c = 0; c < w; c++) {
-        if (layout[r][c] === 'W') {
-          const correctVal = tempBoard[r][c] as number;
-          solution[r][c] = correctVal;
-          finalBoard[r][c] = {
-            type: 'white',
-            value: '',
-            correctValue: correctVal,
-            notes: [],
-          };
-        } else {
-          const host = clueHost.get(`${r},${c}`);
-          finalBoard[r][c] = {
-            type: 'black',
-            clueRight: host?.clueRight,
-            clueDown: host?.clueDown,
-          };
-        }
-      }
-    }
-
-    // Uniqueness is not enforced as a hard gate: the small fixed layout
-    // templates yield many multi-solution puzzles, and a strict check makes
-    // generation slow and unreliable. Use the exported `countSolutions` to
-    // verify a puzzle manually if needed.
-    chosenFinalBoard = finalBoard;
   }
 
-  if (!chosenFinalBoard) return null;
-  const finalBoard = chosenFinalBoard;
-
-  // Pre-reveal some cells based on difficulty
-  let revealChance = 0;
-  if (difficulty === 'easy') revealChance = 0.25;
-  if (difficulty === 'medium') revealChance = 0.10;
+  const finalBoard: Board = Array.from({ length: h }, () => []);
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < w; c++) {
+      if (layout[r][c] === 'W') {
+        finalBoard[r][c] = {
+          type: 'white',
+          value: '',
+          correctValue: tempBoard[r][c] as number,
+          notes: [],
+        };
+      } else {
+        const host = clueHost.get(`${r},${c}`);
+        finalBoard[r][c] = {
+          type: 'black',
+          clueRight: host?.clueRight,
+          clueDown: host?.clueDown,
+        };
+      }
+    }
+  }
 
   const preRevealed: boolean[][] = Array.from({ length: h }, () => Array(w).fill(false));
-  if (revealChance > 0) {
-    for (const { r, c } of whiteCells) {
-      if (Math.random() < revealChance) {
-        const cell = finalBoard[r][c] as WhiteCell;
-        cell.value = cell.correctValue;
-        preRevealed[r][c] = true;
-      }
+
+  // Uniqueness gate, built by digging holes rather than adding givens.
+  //
+  // countSolutions is cheap on a mostly-filled board and expensive on an
+  // empty one (an empty 11x11 costs ~1s, a 40%-filled one <1ms), so we start
+  // from the full solution and remove cells one at a time, keeping a removal
+  // only if the puzzle still has exactly one solution. Every intermediate
+  // check therefore runs in the cheap regime, and the invariant "exactly one
+  // solution" holds at every step by construction.
+  const isGiven: boolean[][] = Array.from({ length: h }, () => Array(w).fill(true));
+  for (const { r, c } of whiteCells) {
+    const cell = finalBoard[r][c] as WhiteCell;
+    cell.value = cell.correctValue;
+  }
+
+  // Difficulty sets how aggressively we dig. Easy leaves more givens.
+  const targetHoleRatio = difficulty === 'easy' ? 0.6 : difficulty === 'medium' ? 0.8 : 0.95;
+  const maxHoles = Math.floor(whiteCells.length * targetHoleRatio);
+
+  let holes = 0;
+  for (const { r, c } of shuffle(whiteCells)) {
+    if (holes >= maxHoles) break;
+    const cell = finalBoard[r][c] as WhiteCell;
+    const saved = cell.value;
+    cell.value = '';
+    // A tight per-removal budget keeps "New Game" responsive. Exhausting it
+    // returns CAP, which is treated the same as a genuine second solution:
+    // the removal is rejected. That only ever makes the puzzle easier, never
+    // ambiguous, so it is safe to fail closed here.
+    if (countSolutions(finalBoard, cellToHRun, cellToVRun, runTargetSum, DIG_NODE_BUDGET) === 1) {
+      isGiven[r][c] = false;
+      holes++;
+    } else {
+      cell.value = saved;
     }
   }
 
-  // Re-derive the solution grid from the (possibly pre-revealed) finalBoard.
+  // A puzzle where almost nothing could be dug out is not worth playing.
+  if (holes < whiteCells.length * 0.35) return null;
+
+  for (const { r, c } of whiteCells) {
+    if (isGiven[r][c]) preRevealed[r][c] = true;
+  }
+
   const solution: number[][] = Array.from({ length: h }, () => Array(w).fill(0));
   for (let r = 0; r < h; r++) {
     for (let c = 0; c < w; c++) {
@@ -476,15 +539,26 @@ function tryGenerate(difficulty: 'easy' | 'medium' | 'hard'): {
   return { board: finalBoard, solution, preRevealed };
 }
 
+/**
+ * Counts the solutions consistent with the clues, stopping at `CAP`.
+ * Cells that already hold a value are treated as fixed givens.
+ * A return of 1 means the puzzle is uniquely solvable as presented.
+ *
+ * `nodeBudget` bounds the search so a pathological board cannot hang the
+ * caller. If the budget is exhausted the function returns CAP, i.e. it
+ * reports "not provably unique" rather than claiming uniqueness it did not
+ * establish. Callers must treat that as a rejection, never as a pass.
+ */
 export function countSolutions(
   board: Board,
   cellToHRun: Map<string, Coord[]>,
   cellToVRun: Map<string, Coord[]>,
-  runTargetSum: Map<string, number>
+  runTargetSum: Map<string, number>,
+  nodeBudget = 200000
 ): number {
   const h = board.length;
   const w = board[0].length;
-  const CAP = 3;
+  const CAP = 2;
 
   const tempBoard: ('B' | number)[][] = Array.from({ length: h }, (_, r) =>
     Array.from({ length: w }, (_, c) => {
@@ -503,6 +577,8 @@ export function countSolutions(
   }
 
   let found = 0;
+  let nodes = 0;
+  let exhausted = false;
 
   function runKey(run: Coord[], direction: Direction): string | null {
     if (run.length === 0) return null;
@@ -537,7 +613,11 @@ export function countSolutions(
   }
 
   function solve(index: number): void {
-    if (found >= CAP) return;
+    if (found >= CAP || exhausted) return;
+    if (nodes++ > nodeBudget) {
+      exhausted = true;
+      return;
+    }
     if (index === unknown.length) {
       found++;
       return;
@@ -559,14 +639,48 @@ export function countSolutions(
       tempBoard[r][c] = d;
       if (!isRunPruned(hRun, 'h') && !isRunPruned(vRun, 'v')) {
         solve(index + 1);
-        if (found >= CAP) return;
+        if (found >= CAP || exhausted) return;
       }
       tempBoard[r][c] = 0;
     }
   }
 
   solve(0);
-  return found;
+  return exhausted ? CAP : found;
+}
+
+/**
+ * Rebuilds the run lookup maps for an existing board. Needed to call
+ * `countSolutions` on a board that came from storage rather than fresh
+ * generation.
+ */
+export function buildRunIndex(board: Board): {
+  cellToHRun: Map<string, Coord[]>;
+  cellToVRun: Map<string, Coord[]>;
+  runTargetSum: Map<string, number>;
+} {
+  const layout = board.map(row => row.map(cell => (cell.type === 'white' ? 'W' : 'B')));
+  const { hRuns, vRuns } = enumerateRuns(layout);
+  const cellToHRun = new Map<string, Coord[]>();
+  const cellToVRun = new Map<string, Coord[]>();
+  for (const run of hRuns) {
+    for (const coord of run) cellToHRun.set(`${coord.r},${coord.c}`, run);
+  }
+  for (const run of vRuns) {
+    for (const coord of run) cellToVRun.set(`${coord.r},${coord.c}`, run);
+  }
+
+  const runTargetSum = new Map<string, number>();
+  for (let r = 0; r < board.length; r++) {
+    for (let c = 0; c < board[0].length; c++) {
+      const cell = board[r][c];
+      if (cell.type !== 'black') continue;
+      if (cell.clueRight !== undefined) runTargetSum.set(`h:${r},${c}`, cell.clueRight);
+      if (cell.clueDown !== undefined) runTargetSum.set(`v:${r},${c}`, cell.clueDown);
+    }
+  }
+
+  return { cellToHRun, cellToVRun, runTargetSum };
 }
 
 export function checkWinCondition(board: Board): {
@@ -643,4 +757,49 @@ export function getRunStatus(
     count: runCoords.length,
     filledCount,
   };
+}
+
+/**
+ * Computes the per-run completion state for every clue-bearing black cell in
+ * one pass, so the UI does not re-walk each run per cell per render.
+ * Keyed `${r},${c}` of the black host cell.
+ */
+export function computeClueStatuses(board: Board): Map<
+  string,
+  { rightComplete: boolean; rightOver: boolean; downComplete: boolean; downOver: boolean }
+> {
+  const h = board.length;
+  const w = board[0].length;
+  const result = new Map<
+    string,
+    { rightComplete: boolean; rightOver: boolean; downComplete: boolean; downOver: boolean }
+  >();
+
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < w; c++) {
+      const cell = board[r][c];
+      if (cell.type !== 'black') continue;
+      if (cell.clueRight === undefined && cell.clueDown === undefined) continue;
+
+      let rightComplete = false;
+      let rightOver = false;
+      let downComplete = false;
+      let downOver = false;
+
+      if (cell.clueRight !== undefined && c + 1 < w) {
+        const status = getRunStatus(board, r, c + 1, 'h');
+        rightComplete = status.isComplete;
+        rightOver = status.isOver;
+      }
+      if (cell.clueDown !== undefined && r + 1 < h) {
+        const status = getRunStatus(board, r + 1, c, 'v');
+        downComplete = status.isComplete;
+        downOver = status.isOver;
+      }
+
+      result.set(`${r},${c}`, { rightComplete, rightOver, downComplete, downOver });
+    }
+  }
+
+  return result;
 }

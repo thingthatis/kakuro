@@ -1,17 +1,117 @@
 import { describe, it, expect } from 'vitest';
-import { generateKakuroPuzzle, checkWinCondition, getRunStatus, type Board, type WhiteCell, type BlackCell } from './kakuroEngine';
+import {
+  generateKakuroPuzzle,
+  generateLayout,
+  validateLayout,
+  buildRunIndex,
+  countSolutions,
+  checkWinCondition,
+  getRunStatus,
+  computeClueStatuses,
+  type Board,
+  type WhiteCell,
+  type BlackCell,
+} from './kakuroEngine';
+import type { Difficulty } from './types';
+
+const DIFFICULTIES: Difficulty[] = ['easy', 'medium', 'hard'];
+
+/** Enumerates maximal white runs in both directions. */
+function runsOf(board: Board) {
+  const h = board.length;
+  const w = board[0].length;
+  const runs: { cells: { r: number; c: number }[]; dir: 'h' | 'v' }[] = [];
+  for (let r = 0; r < h; r++) {
+    let c = 0;
+    while (c < w) {
+      if (board[r][c].type !== 'white') { c++; continue; }
+      const start = c;
+      const cells: { r: number; c: number }[] = [];
+      while (c < w && board[r][c].type === 'white') { cells.push({ r, c }); c++; }
+      void start;
+      runs.push({ cells, dir: 'h' });
+    }
+  }
+  for (let c = 0; c < w; c++) {
+    let r = 0;
+    while (r < h) {
+      if (board[r][c].type !== 'white') { r++; continue; }
+      const cells: { r: number; c: number }[] = [];
+      while (r < h && board[r][c].type === 'white') { cells.push({ r, c }); r++; }
+      runs.push({ cells, dir: 'v' });
+    }
+  }
+  return runs;
+}
+
+function solvedCopy(board: Board): Board {
+  return board.map(row =>
+    row.map(cell => (cell.type === 'white' ? ({ ...cell, value: cell.correctValue } as WhiteCell) : cell))
+  );
+}
+
+describe('generateLayout / validateLayout', () => {
+  it('produces layouts satisfying every structural invariant', () => {
+    const specs = [
+      { size: 7, blackRatio: 0.2, maxRun: 4 },
+      { size: 9, blackRatio: 0.26, maxRun: 5 },
+      { size: 11, blackRatio: 0.3, maxRun: 6 },
+    ];
+    for (const spec of specs) {
+      const layout = generateLayout(spec);
+      expect(layout).not.toBeNull();
+      if (!layout) continue;
+      expect(validateLayout(layout, spec.maxRun)).toBe(true);
+      expect(layout.length).toBe(spec.size);
+      expect(layout[0].length).toBe(spec.size);
+    }
+  });
+
+  it('rejects a layout with a white cell in row 0 or column 0', () => {
+    // Row 0 / column 0 must be black because they host every clue.
+    const bad = [
+      ['B', 'W', 'B'],
+      ['B', 'W', 'W'],
+      ['B', 'W', 'W'],
+    ];
+    expect(validateLayout(bad, 4)).toBe(false);
+
+    const bad2 = [
+      ['B', 'B', 'B'],
+      ['W', 'W', 'W'],
+      ['B', 'W', 'W'],
+    ];
+    expect(validateLayout(bad2, 4)).toBe(false);
+  });
+
+  it('rejects a layout containing a length-1 run', () => {
+    const bad = [
+      ['B', 'B', 'B'],
+      ['B', 'W', 'B'],
+      ['B', 'B', 'B'],
+    ];
+    expect(validateLayout(bad, 4)).toBe(false);
+  });
+
+  it('rejects a layout containing a run longer than the cap', () => {
+    const grid = [
+      ['B', 'B', 'B', 'B', 'B'],
+      ['B', 'W', 'W', 'W', 'W'],
+      ['B', 'W', 'W', 'W', 'W'],
+      ['B', 'W', 'W', 'W', 'W'],
+      ['B', 'W', 'W', 'W', 'W'],
+    ];
+    expect(validateLayout(grid, 4)).toBe(true);
+    expect(validateLayout(grid, 3)).toBe(false);
+  });
+});
 
 describe('generateKakuroPuzzle', () => {
-  it('produces a board with the expected dimensions for each difficulty', () => {
-    const cases: Array<['easy' | 'medium' | 'hard', number, number]> = [
-      ['easy', 6, 6],
-      ['medium', 8, 8],
-      ['hard', 10, 10],
-    ];
-    for (const [d, h, w] of cases) {
+  it('produces a square board for each difficulty', () => {
+    for (const d of DIFFICULTIES) {
       const { board } = generateKakuroPuzzle(d);
-      expect(board.length).toBe(h);
-      expect(board[0].length).toBe(w);
+      expect(board.length).toBeGreaterThan(0);
+      expect(board[0].length).toBe(board.length);
     }
   });
 
@@ -29,120 +129,176 @@ describe('generateKakuroPuzzle', () => {
     }
   });
 
-  it('every clue cell has a clueRight or clueDown when adjacent to a white run', () => {
-    const { board } = generateKakuroPuzzle('medium');
-    for (let r = 0; r < board.length; r++) {
-      for (let c = 0; c < board[0].length; c++) {
-        const cell = board[r][c] as BlackCell;
-        if (cell.type !== 'black') continue;
-        const rightHasWhite = c + 1 < board[0].length && board[r][c + 1].type === 'white';
-        const downHasWhite = r + 1 < board.length && board[r + 1][c].type === 'white';
-        if (rightHasWhite) expect(cell.clueRight).toBeDefined();
-        if (downHasWhite) expect(cell.clueDown).toBeDefined();
-        if (!rightHasWhite) expect(cell.clueRight).toBeUndefined();
-        if (!downHasWhite) expect(cell.clueDown).toBeUndefined();
+  it('never emits an orphan clue (a clue pointing at no run)', () => {
+    for (const d of DIFFICULTIES) {
+      for (let i = 0; i < 5; i++) {
+        const { board } = generateKakuroPuzzle(d);
+        const h = board.length;
+        const w = board[0].length;
+        for (let r = 0; r < h; r++) {
+          for (let c = 0; c < w; c++) {
+            const cell = board[r][c] as BlackCell;
+            if (cell.type !== 'black') continue;
+            const rightWhite = c + 1 < w && board[r][c + 1].type === 'white';
+            const downWhite = r + 1 < h && board[r + 1][c].type === 'white';
+            if (cell.clueRight !== undefined) expect(rightWhite).toBe(true);
+            if (cell.clueDown !== undefined) expect(downWhite).toBe(true);
+          }
+        }
       }
     }
   });
 
-  it('emits a preRevealed grid of the same dimensions, with at most one marker per white cell', () => {
-    for (const d of ['easy', 'medium', 'hard'] as const) {
+  it('gives every run a clue host, so no run goes unvalidated', () => {
+    for (const d of DIFFICULTIES) {
+      for (let i = 0; i < 5; i++) {
+        const { board } = generateKakuroPuzzle(d);
+        for (const { cells, dir } of runsOf(board)) {
+          const first = cells[0];
+          if (dir === 'h') {
+            expect(first.c).toBeGreaterThan(0);
+            const host = board[first.r][first.c - 1] as BlackCell;
+            expect(host.type).toBe('black');
+            expect(host.clueRight).toBeDefined();
+          } else {
+            expect(first.r).toBeGreaterThan(0);
+            const host = board[first.r - 1][first.c] as BlackCell;
+            expect(host.type).toBe('black');
+            expect(host.clueDown).toBeDefined();
+          }
+        }
+      }
+    }
+  });
+
+  it('every clue equals the sum of its run in the intended solution', () => {
+    for (const d of DIFFICULTIES) {
+      for (let i = 0; i < 5; i++) {
+        const { board } = generateKakuroPuzzle(d);
+        for (const { cells, dir } of runsOf(board)) {
+          const first = cells[0];
+          const expected = cells.reduce(
+            (sum, { r, c }) => sum + (board[r][c] as WhiteCell).correctValue,
+            0
+          );
+          const host =
+            dir === 'h'
+              ? (board[first.r][first.c - 1] as BlackCell)
+              : (board[first.r - 1][first.c] as BlackCell);
+          const clue = dir === 'h' ? host.clueRight : host.clueDown;
+          expect(clue).toBe(expected);
+        }
+      }
+    }
+  });
+
+  it('never emits a run shorter than 2 or longer than 9', () => {
+    for (const d of DIFFICULTIES) {
+      const { board } = generateKakuroPuzzle(d);
+      for (const { cells } of runsOf(board)) {
+        expect(cells.length).toBeGreaterThanOrEqual(2);
+        expect(cells.length).toBeLessThanOrEqual(9);
+      }
+    }
+  });
+
+  it('produces a puzzle with exactly one solution', () => {
+    for (const d of DIFFICULTIES) {
+      for (let i = 0; i < 3; i++) {
+        const { board } = generateKakuroPuzzle(d);
+        const { cellToHRun, cellToVRun, runTargetSum } = buildRunIndex(board);
+        expect(countSolutions(board, cellToHRun, cellToVRun, runTargetSum)).toBe(1);
+      }
+    }
+  });
+
+  it('leaves cells for the player to fill in', () => {
+    for (const d of DIFFICULTIES) {
+      const { board, preRevealed } = generateKakuroPuzzle(d);
+      let white = 0;
+      let empty = 0;
+      for (let r = 0; r < board.length; r++) {
+        for (let c = 0; c < board[0].length; c++) {
+          if (board[r][c].type !== 'white') continue;
+          white++;
+          if ((board[r][c] as WhiteCell).value === '') empty++;
+          // preRevealed must agree with a non-empty value
+          expect(preRevealed[r][c]).toBe((board[r][c] as WhiteCell).value !== '');
+        }
+      }
+      expect(empty).toBeGreaterThan(white * 0.3);
+    }
+  });
+
+  it('marks pre-revealed cells only on white cells, in a same-size grid', () => {
+    for (const d of DIFFICULTIES) {
       const { board, preRevealed } = generateKakuroPuzzle(d);
       expect(preRevealed.length).toBe(board.length);
       expect(preRevealed[0].length).toBe(board[0].length);
       for (let r = 0; r < board.length; r++) {
         for (let c = 0; c < board[0].length; c++) {
-          if (preRevealed[r][c]) {
-            expect(board[r][c].type).toBe('white');
-          }
+          if (preRevealed[r][c]) expect(board[r][c].type).toBe('white');
         }
       }
     }
   });
 
-  it('every horizontal run has a clue, including edge runs starting at column 0', () => {
-    for (let i = 0; i < 10; i++) {
-      const { board } = generateKakuroPuzzle('hard');
-      const h = board.length;
-      const w = board[0].length;
-      for (let r = 0; r < h; r++) {
-        for (let c = 0; c < w; c++) {
-          if (board[r][c].type !== 'white') continue;
-          // A cell is the start of a horizontal run if the cell to its left
-          // is either out of bounds or black AND the cell above is either
-          // out of bounds or black (otherwise the run actually starts above
-          // us, e.g. we're in a corner with white above and white to the left).
-          const leftIsBlackOrEdge = c === 0 || board[r][c - 1].type === 'black';
-          const upIsBlackOrEdge = r === 0 || board[r - 1][c].type === 'black';
-          if (!leftIsBlackOrEdge || !upIsBlackOrEdge) continue;
-          // The horizontal run starts at (r, c) if c === 0 or left is black.
-          // For a normal run (c > 0), the host is (r, c-1). For an edge run
-          // (c === 0 and r > 0), the host is (r-1, 0).
-          let hostHasClue = false;
-          if (c > 0) {
-            const host = board[r][c - 1] as BlackCell;
-            if (host.type === 'black' && host.clueRight !== undefined) hostHasClue = true;
-          } else if (r > 0) {
-            const host = board[r - 1][0] as BlackCell;
-            if (host.type === 'black' && host.clueRight !== undefined) hostHasClue = true;
-          } else {
-            hostHasClue = true; // (0, 0) — out of scope
-          }
-          expect(hostHasClue).toBe(true);
-        }
-      }
+  it('accepts the intended solution as a win', () => {
+    for (const d of DIFFICULTIES) {
+      const { board } = generateKakuroPuzzle(d);
+      expect(checkWinCondition(solvedCopy(board)).isWin).toBe(true);
     }
   });
 
-  it('every vertical run has a clue, including edge runs starting at row 0', () => {
-    for (let i = 0; i < 10; i++) {
-      const { board } = generateKakuroPuzzle('hard');
-      const h = board.length;
-      const w = board[0].length;
-      for (let c = 0; c < w; c++) {
-        for (let r = 0; r < h; r++) {
-          if (board[r][c].type !== 'white') continue;
-          const upIsBlackOrEdge = r === 0 || board[r - 1][c].type === 'black';
-          const leftIsBlackOrEdge = c === 0 || board[r][c - 1].type === 'black';
-          if (!upIsBlackOrEdge || !leftIsBlackOrEdge) continue;
-          let hostHasClue = false;
-          if (r > 0) {
-            const host = board[r - 1][c] as BlackCell;
-            if (host.type === 'black' && host.clueDown !== undefined) hostHasClue = true;
-          } else if (c > 0) {
-            const host = board[0][c - 1] as BlackCell;
-            if (host.type === 'black' && host.clueDown !== undefined) hostHasClue = true;
-          } else {
-            hostHasClue = true; // (0, 0)
-          }
-          expect(hostHasClue).toBe(true);
-        }
+  it('rejects a wrong fill that merely permutes digits within a run', () => {
+    // Regression: unclued runs used to go unvalidated, so swapping two digits
+    // inside one still registered a win.
+    for (const d of DIFFICULTIES) {
+      for (let i = 0; i < 5; i++) {
+        const { board } = generateKakuroPuzzle(d);
+        const solved = solvedCopy(board);
+        const run = runsOf(board).find(({ cells }) => {
+          if (cells.length < 2) return false;
+          const a = board[cells[0].r][cells[0].c] as WhiteCell;
+          const b = board[cells[1].r][cells[1].c] as WhiteCell;
+          return a.correctValue !== b.correctValue;
+        });
+        expect(run).toBeDefined();
+        if (!run) continue;
+        const a = solved[run.cells[0].r][run.cells[0].c] as WhiteCell;
+        const b = solved[run.cells[1].r][run.cells[1].c] as WhiteCell;
+        const tmp = a.value;
+        a.value = b.value;
+        b.value = tmp;
+        expect(checkWinCondition(solved).isWin).toBe(false);
       }
     }
   });
 });
 
-describe('checkWinCondition', () => {
-  it('reports a win when every white cell holds the correct solution value', () => {
+describe('countSolutions', () => {
+  it('returns 1 for a fully solved board', () => {
     const { board } = generateKakuroPuzzle('easy');
-    const solved: Board = board.map(row =>
-      row.map(cell => {
-        if (cell.type === 'white') {
-          return { ...cell, value: cell.correctValue } as WhiteCell;
-        }
-        return cell;
-      })
-    );
-    expect(checkWinCondition(solved).isWin).toBe(true);
+    const solved = solvedCopy(board);
+    const idx = buildRunIndex(solved);
+    expect(countSolutions(solved, idx.cellToHRun, idx.cellToVRun, idx.runTargetSum)).toBe(1);
   });
 
-  it('reports not-won on an empty board', () => {
+  it('fails closed (reports non-unique) when the node budget is exhausted', () => {
+    const { board } = generateKakuroPuzzle('hard');
+    const idx = buildRunIndex(board);
+    // A budget of 1 node cannot prove anything, so it must not claim uniqueness.
+    expect(countSolutions(board, idx.cellToHRun, idx.cellToVRun, idx.runTargetSum, 1)).not.toBe(1);
+  });
+});
+
+describe('checkWinCondition', () => {
+  it('reports not-won on a freshly generated board', () => {
     const { board } = generateKakuroPuzzle('easy');
     expect(checkWinCondition(board).isWin).toBe(false);
   });
 
   it('flags a duplicate within a run', () => {
-    // Construct a tiny board directly so the duplicate is deterministic.
     const board: Board = [
       [
         { type: 'black', clueRight: 5 },
@@ -156,8 +312,7 @@ describe('checkWinCondition', () => {
     expect(result.isWin).toBe(false);
   });
 
-  it('flags a wrong-sum run when the run is fully filled with digits that do not add up', () => {
-    // 2-cell horizontal run, clue 5, filled with 1 and 2 (sum 3).
+  it('flags a fully filled run whose digits do not add up', () => {
     const board: Board = [
       [
         { type: 'black', clueRight: 5 },
@@ -175,24 +330,12 @@ describe('checkWinCondition', () => {
 describe('getRunStatus', () => {
   it('returns zero sum and zero target for a non-white cell', () => {
     const { board } = generateKakuroPuzzle('easy');
-    let black: { r: number; c: number } | null = null;
-    outer: for (let r = 0; r < board.length; r++) {
-      for (let c = 0; c < board[0].length; c++) {
-        if (board[r][c].type === 'black') {
-          black = { r, c };
-          break outer;
-        }
-      }
-    }
-    expect(black).not.toBeNull();
-    if (black) {
-      const status = getRunStatus(board, black.r, black.c, 'h');
-      expect(status.count).toBe(0);
-      expect(status.targetSum).toBe(0);
-    }
+    const status = getRunStatus(board, 0, 0, 'h');
+    expect(status.count).toBe(0);
+    expect(status.targetSum).toBe(0);
   });
 
-  it('reports the correct target sum for a run', () => {
+  it('reports the target sum from the hosting clue', () => {
     const { board } = generateKakuroPuzzle('easy');
     for (let r = 0; r < board.length; r++) {
       for (let c = 0; c < board[0].length; c++) {
@@ -209,23 +352,48 @@ describe('getRunStatus', () => {
     }
   });
 
-  it('reports the current sum correctly', () => {
+  it('marks a run complete exactly when it is full and sums correctly', () => {
     const { board } = generateKakuroPuzzle('easy');
-    const mutated: Board = board.map(row =>
-      row.map(cell => {
-        if (cell.type === 'white') return { ...cell, value: '' } as WhiteCell;
-        return cell;
-      })
-    );
-    for (let r = 0; r < board.length; r++) {
-      for (let c = 0; c < board[0].length; c++) {
-        if (mutated[r][c].type !== 'white') continue;
-        (mutated[r][c] as WhiteCell).value = (mutated[r][c] as WhiteCell).correctValue;
-        const hStatus = getRunStatus(mutated, r, c, 'h');
-        expect(hStatus.currentSum).toBeGreaterThan(0);
-        expect(hStatus.filledCount).toBeGreaterThanOrEqual(1);
-        return;
+    const solved = solvedCopy(board);
+    for (const { cells, dir } of runsOf(solved)) {
+      const { r, c } = cells[0];
+      const status = getRunStatus(solved, r, c, dir);
+      expect(status.isComplete).toBe(true);
+      expect(status.isOver).toBe(false);
+      expect(status.filledCount).toBe(cells.length);
+    }
+  });
+});
+
+describe('computeClueStatuses', () => {
+  it('agrees with getRunStatus for every clue-bearing cell', () => {
+    const { board } = generateKakuroPuzzle('medium');
+    const solved = solvedCopy(board);
+    const statuses = computeClueStatuses(solved);
+    const h = solved.length;
+    const w = solved[0].length;
+    for (let r = 0; r < h; r++) {
+      for (let c = 0; c < w; c++) {
+        const cell = solved[r][c];
+        if (cell.type !== 'black') continue;
+        if (cell.clueRight === undefined && cell.clueDown === undefined) continue;
+        const entry = statuses.get(`${r},${c}`);
+        expect(entry).toBeDefined();
+        if (!entry) continue;
+        if (cell.clueRight !== undefined) {
+          expect(entry.rightComplete).toBe(getRunStatus(solved, r, c + 1, 'h').isComplete);
+        }
+        if (cell.clueDown !== undefined) {
+          expect(entry.downComplete).toBe(getRunStatus(solved, r + 1, c, 'v').isComplete);
+        }
       }
     }
+  });
+
+  it('omits black cells that carry no clue', () => {
+    const { board } = generateKakuroPuzzle('easy');
+    const statuses = computeClueStatuses(board);
+    // (0,0) is always a black corner with no clue.
+    expect(statuses.has('0,0')).toBe(false);
   });
 });
