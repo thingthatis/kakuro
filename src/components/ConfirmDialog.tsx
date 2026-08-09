@@ -1,3 +1,5 @@
+import { useFocusTrap } from '../hooks/useFocusTrap';
+
 interface ConfirmDialogProps {
   title: string;
   message: string;
@@ -17,11 +19,20 @@ export function ConfirmDialog({
   onCancel,
   destructive,
 }: ConfirmDialogProps) {
+  const ref = useFocusTrap<HTMLDivElement>(onCancel);
   return (
     <div className="modal-overlay" onClick={onCancel}>
-      <div className="modal" onClick={e => e.stopPropagation()} role="alertdialog" aria-labelledby="confirm-title">
+      <div
+        ref={ref}
+        className="modal"
+        onClick={e => e.stopPropagation()}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="confirm-title"
+        aria-describedby="confirm-message"
+      >
         <h2 id="confirm-title" style={{ marginTop: 0 }}>{title}</h2>
-        <p style={{ color: 'var(--text-secondary)' }}>{message}</p>
+        <p id="confirm-message" style={{ color: 'var(--text-secondary)' }}>{message}</p>
         <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
           <button className="btn" onClick={onCancel}>
             {cancelLabel}

@@ -1,40 +1,61 @@
-import { getRunStatus } from '../kakuroEngine';
+import { memo, useEffect, useRef } from 'react';
 import type { Board, WhiteCell as WhiteCellT, BlackCell as BlackCellT } from '../kakuroEngine';
+
+export interface ClueStatus {
+  rightComplete: boolean;
+  rightOver: boolean;
+  downComplete: boolean;
+  downOver: boolean;
+}
 
 interface GameBoardProps {
   board: Board;
   preRevealed: boolean[][];
   selectedCell: { r: number; c: number } | null;
   editDirection: 'h' | 'v';
-  errors: { r: number; c: number }[];
+  errorSet: Set<string>;
   showErrors: boolean;
   runStatusByCell: (r: number, c: number) => { inHRun: boolean; inVRun: boolean };
+  clueStatuses: Map<string, ClueStatus>;
   onCellClick: (r: number, c: number) => void;
 }
+
+const EMPTY_STATUS: ClueStatus = {
+  rightComplete: false,
+  rightOver: false,
+  downComplete: false,
+  downOver: false,
+};
+
+const NOTE_DIGITS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 export function GameBoard({
   board,
   preRevealed,
   selectedCell,
   editDirection,
-  errors,
+  errorSet,
   showErrors,
   runStatusByCell,
+  clueStatuses,
   onCellClick,
 }: GameBoardProps) {
-  const errorSet = new Set(errors.map(e => `${e.r},${e.c}`));
   return (
     <div className="grid-container" role="grid" aria-label="Kakuro puzzle board">
       {board.map((row, rIdx) => (
         <div key={rIdx} className="grid-row" role="row">
           {row.map((cell, cIdx) => {
             if (cell.type === 'black') {
-              return <BlackCellView key={cIdx} cell={cell} board={board} rIdx={rIdx} cIdx={cIdx} />;
+              return (
+                <BlackCellView
+                  key={cIdx}
+                  cell={cell}
+                  status={clueStatuses.get(`${rIdx},${cIdx}`) ?? EMPTY_STATUS}
+                />
+              );
             }
             const { inHRun, inVRun } = runStatusByCell(rIdx, cIdx);
             const isSelected = selectedCell?.r === rIdx && selectedCell?.c === cIdx;
-            const hasError = errorSet.has(`${rIdx},${cIdx}`);
-            const isPre = preRevealed[rIdx]?.[cIdx] === true;
             return (
               <WhiteCellView
                 key={cIdx}
@@ -45,8 +66,8 @@ export function GameBoard({
                 inHRun={inHRun}
                 inVRun={inVRun}
                 editDirection={editDirection}
-                hasError={hasError && showErrors}
-                isPreRevealed={isPre}
+                hasError={showErrors && errorSet.has(`${rIdx},${cIdx}`)}
+                isPreRevealed={preRevealed[rIdx]?.[cIdx] === true}
                 onClick={onCellClick}
               />
             );
@@ -57,49 +78,31 @@ export function GameBoard({
   );
 }
 
-function BlackCellView({
+const BlackCellView = memo(function BlackCellView({
   cell,
-  board,
-  rIdx,
-  cIdx,
+  status,
 }: {
   cell: BlackCellT;
-  board: Board;
-  rIdx: number;
-  cIdx: number;
+  status: ClueStatus;
 }) {
-  const h = board.length;
-  const w = board[0].length;
-  let isRightComplete = false;
-  let isRightOver = false;
-  let isDownComplete = false;
-  let isDownOver = false;
-
-  if (cell.clueRight !== undefined && rIdx < h && cIdx + 1 < w) {
-    const status = getRunStatus(board, rIdx, cIdx + 1, 'h');
-    isRightComplete = status.isComplete;
-    isRightOver = status.isOver;
-  }
-  if (cell.clueDown !== undefined && cIdx < w && rIdx + 1 < h) {
-    const status = getRunStatus(board, rIdx + 1, cIdx, 'v');
-    isDownComplete = status.isComplete;
-    isDownOver = status.isOver;
-  }
-
   const hasClues = cell.clueRight !== undefined || cell.clueDown !== undefined;
   return (
     <div className={`cell cell-black ${hasClues ? 'has-clues' : ''}`} role="gridcell" aria-hidden="true">
       <div className="clue-container">
         {cell.clueRight !== undefined && (
           <span
-            className={`clue-val clue-right ${isRightComplete ? 'complete' : ''} ${isRightOver ? 'over' : ''}`}
+            className={`clue-val clue-right ${status.rightComplete ? 'complete' : ''} ${
+              status.rightOver ? 'over' : ''
+            }`}
           >
             {cell.clueRight}
           </span>
         )}
         {cell.clueDown !== undefined && (
           <span
-            className={`clue-val clue-down ${isDownComplete ? 'complete' : ''} ${isDownOver ? 'over' : ''}`}
+            className={`clue-val clue-down ${status.downComplete ? 'complete' : ''} ${
+              status.downOver ? 'over' : ''
+            }`}
           >
             {cell.clueDown}
           </span>
@@ -107,9 +110,9 @@ function BlackCellView({
       </div>
     </div>
   );
-}
+});
 
-function WhiteCellView({
+const WhiteCellView = memo(function WhiteCellView({
   cell,
   rIdx,
   cIdx,
@@ -132,6 +135,17 @@ function WhiteCellView({
   isPreRevealed: boolean;
   onClick: (r: number, c: number) => void;
 }) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Roving tabindex: only the selected cell is tabbable, and it takes DOM
+  // focus so that screen readers and Tab-based navigation stay in sync with
+  // the game's own notion of the selected cell.
+  useEffect(() => {
+    if (isSelected && ref.current && document.activeElement !== ref.current) {
+      ref.current.focus({ preventScroll: true });
+    }
+  }, [isSelected]);
+
   let highlightClass = '';
   if (isSelected) {
     highlightClass = 'selected';
@@ -155,15 +169,17 @@ function WhiteCellView({
 
   const valueText = cell.value !== '' ? String(cell.value) : 'empty';
   const ariaLabel = `Row ${rIdx + 1}, column ${cIdx + 1}, ${valueText}${
-    isPreRevealed ? ', pre-filled, read-only' : ''
+    isPreRevealed ? ', given, read-only' : ''
   }${hasError ? ', conflict' : ''}`;
 
   return (
     <div
+      ref={ref}
       className={classes}
       role="gridcell"
-      tabIndex={0}
+      tabIndex={isSelected ? 0 : -1}
       aria-selected={isSelected}
+      aria-readonly={isPreRevealed || undefined}
       aria-label={ariaLabel}
       onClick={() => onClick(rIdx, cIdx)}
     >
@@ -171,7 +187,7 @@ function WhiteCellView({
         <span className="cell-value">{cell.value}</span>
       ) : (
         <div className="notes-container">
-          {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
+          {NOTE_DIGITS.map(num => (
             <div key={num} className="note-mark">
               {cell.notes?.includes(num) ? num : ''}
             </div>
@@ -180,4 +196,4 @@ function WhiteCellView({
       )}
     </div>
   );
-}
+});

@@ -3,6 +3,7 @@ import {
     generateKakuroPuzzle,
     checkWinCondition,
     getRunStatus,
+    computeClueStatuses,
 } from './kakuroEngine';
 import type { Board, WhiteCell } from './kakuroEngine';
 import type { Difficulty } from './types';
@@ -12,6 +13,7 @@ import { getPartitionsCached } from './hooks/usePartitions';
 import {
     loadState,
     saveState,
+    patchSavedTimer,
     clearState,
     loadStats,
     saveStats,
@@ -85,7 +87,6 @@ function findFirstPlayableCell(board: Board, preRevealed: boolean[][]): { r: num
 }
 
 function App() {
-    const [difficulty, setDifficulty] = useState<Difficulty>('medium');
     const initial = useMemo(() => {
         const saved = loadState();
         if (saved) {
@@ -112,6 +113,10 @@ function App() {
             showErrorsMode: true,
         };
     }, []);
+
+    // Seeded from the saved game so a restored hard puzzle does not report
+    // itself as medium (and so the next "New Game" uses the right difficulty).
+    const [difficulty, setDifficulty] = useState<Difficulty>(initial.difficulty);
 
     const [board, setBoard] = useState<Board>(initial.board);
     const [preRevealed, setPreRevealed] = useState<boolean[][]>(initial.preRevealed);
@@ -144,12 +149,21 @@ function App() {
     const timerRef = useRef<number | null>(null);
     const playSound = useAudio(soundEnabled);
 
-    // Persist state to localStorage on changes.
+    // Latest elapsed seconds, readable from effects without making them
+    // re-run every tick.
+    const elapsedRef = useRef(timer);
+    useEffect(() => {
+        elapsedRef.current = timer;
+    }, [timer]);
+
+    // Persist the board and settings. The timer is deliberately NOT a
+    // dependency: including it re-serialised the whole board to localStorage
+    // once per second. The elapsed time is saved separately below.
     useEffect(() => {
         if (isWon) return;
         saveState({
             board,
-            timer,
+            timer: elapsedRef.current,
             hintsUsed,
             difficulty,
             preRevealed,
@@ -158,7 +172,17 @@ function App() {
             showErrorsMode,
             startEpochMs: Date.now(),
         });
-    }, [board, timer, hintsUsed, difficulty, preRevealed, editDirection, pencilMode, showErrorsMode, isWon]);
+    }, [board, hintsUsed, difficulty, preRevealed, editDirection, pencilMode, showErrorsMode, isWon]);
+
+    // Persist just the elapsed seconds on a coarse cadence, so a refresh does
+    // not lose the clock but we also do not thrash localStorage.
+    useEffect(() => {
+        if (isWon) return;
+        const id = window.setInterval(() => {
+            patchSavedTimer(elapsedRef.current);
+        }, 5000);
+        return () => window.clearInterval(id);
+    }, [isWon]);
 
     // Timer effect
     useEffect(() => {
@@ -247,15 +271,23 @@ function App() {
         setTimerActive(false);
         playSound('win');
 
-        const colors = ['#6366f1', '#a855f7', '#10b981', '#f59e0b', '#3b82f6', '#ec4899'];
-        const particles = Array.from({ length: 80 }).map((_, i) => ({
-            id: i,
-            left: `${Math.random() * 100}%`,
-            color: colors[Math.floor(Math.random() * colors.length)],
-            delay: `${Math.random() * 2}s`,
-            duration: `${2.5 + Math.random() * 2}s`,
-        }));
-        setConfetti(particles);
+        // Skip building particles at all when the user asked for reduced
+        // motion; the CSS hides them, but there is no reason to create them.
+        const prefersReducedMotion =
+            typeof window !== 'undefined' &&
+            window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+        if (!prefersReducedMotion) {
+            const colors = ['#6366f1', '#a855f7', '#10b981', '#f59e0b', '#3b82f6', '#ec4899'];
+            const particles = Array.from({ length: 80 }).map((_, i) => ({
+                id: i,
+                left: `${Math.random() * 100}%`,
+                color: colors[Math.floor(Math.random() * colors.length)],
+                delay: `${Math.random() * 2}s`,
+                duration: `${2.5 + Math.random() * 2}s`,
+            }));
+            setConfetti(particles);
+        }
 
         // Update best time + win count
         setStats(prev => {
@@ -463,6 +495,14 @@ function App() {
 
     const runStatusByCell = useRunStatus(board, selectedCell);
 
+    // Computed once per board change instead of per black cell per render.
+    const clueStatuses = useMemo(() => computeClueStatuses(board), [board]);
+
+    const errorSet = useMemo(
+        () => new Set(errors.map(e => `${e.r},${e.c}`)),
+        [errors]
+    );
+
     const runsInfo = useMemo(() => {
         if (!selectedCell) return null;
         const { r, c } = selectedCell;
@@ -560,9 +600,10 @@ function App() {
                         preRevealed={preRevealed}
                         selectedCell={selectedCell}
                         editDirection={editDirection}
-                        errors={errors}
+                        errorSet={errorSet}
                         showErrors={showErrorsMode}
                         runStatusByCell={runStatusByCell}
+                        clueStatuses={clueStatuses}
                         onCellClick={handleCellClick}
                     />
                 </section>
@@ -583,7 +624,7 @@ function App() {
 
             <footer className="app-footer">
                 <p>
-                    Crafted with ♥ by Gemini CLI •{' '}
+                    A Kakuro puzzle generator and player •{' '}
                     <a
                         href="#"
                         onClick={e => {
@@ -592,8 +633,7 @@ function App() {
                         }}
                     >
                         How to Play
-                    </a>{' '}
-                    • <a href="https://github.com/vitejs/vite" target="_blank" rel="noreferrer">Powered by Vite</a>
+                    </a>
                 </p>
             </footer>
         </div>

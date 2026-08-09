@@ -41,6 +41,25 @@ export function saveState(state: SavedState): void {
   }
 }
 
+/**
+ * Updates only the elapsed-time field of the saved game.
+ *
+ * Persisting the timer via `saveState` would re-serialise the whole board on
+ * every tick, so the clock is patched in place instead. No-op when there is
+ * no saved game.
+ */
+export function patchSavedTimer(timer: number): void {
+  try {
+    const raw = localStorage.getItem(STATE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as SavedState;
+    parsed.timer = timer;
+    localStorage.setItem(STATE_KEY, JSON.stringify(parsed));
+  } catch {
+    // ignore
+  }
+}
+
 export function clearState(): void {
   try {
     localStorage.removeItem(STATE_KEY);

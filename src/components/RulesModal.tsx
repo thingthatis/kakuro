@@ -1,13 +1,22 @@
 import { BookOpen } from 'lucide-react';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 interface RulesModalProps {
   onClose: () => void;
 }
 
 export function RulesModal({ onClose }: RulesModalProps) {
+  const ref = useFocusTrap<HTMLDivElement>(onClose);
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()} role="dialog" aria-labelledby="rules-title">
+      <div
+        ref={ref}
+        className="modal"
+        onClick={e => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="rules-title"
+      >
         <button className="modal-close" onClick={onClose} aria-label="Close rules">
           ✕
         </button>

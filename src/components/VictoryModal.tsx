@@ -1,5 +1,6 @@
 import { Trophy } from 'lucide-react';
 import type { Difficulty } from '../types';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 interface VictoryModalProps {
   difficulty: Difficulty;
@@ -20,9 +21,10 @@ export function VictoryModal({
   onNewPuzzle,
   bestTime,
 }: VictoryModalProps) {
+  const ref = useFocusTrap<HTMLDivElement>(onClose);
   return (
     <div className="modal-overlay">
-      <div className="modal" role="dialog" aria-labelledby="victory-title">
+      <div ref={ref} className="modal" role="dialog" aria-modal="true" aria-labelledby="victory-title">
         <Trophy className="victory-icon" />
         <h2 id="victory-title" className="victory-title">
           Puzzle Complete!

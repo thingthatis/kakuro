@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { ChevronRight } from 'lucide-react';
+import { getPartitionsCached } from '../hooks/usePartitions';
 
 interface RunInfo {
   currentSum: number;
@@ -14,8 +15,32 @@ interface SidebarProps {
   runsInfo: { h: RunInfo; v: RunInfo } | null;
 }
 
+/**
+ * The "unique partitions" a Kakuro player memorises: (sum, length) pairs that
+ * admit exactly one combination of distinct digits, so the digit set is
+ * forced. Derived from getPartitions rather than hardcoded, so the list is
+ * guaranteed complete and correct.
+ */
+function useUniquePartitions() {
+  return useMemo(() => {
+    const rows: { sum: number; length: number; digits: number[] }[] = [];
+    for (let length = 2; length <= 8; length++) {
+      const min = (length * (length + 1)) / 2;
+      const max = length * 9 - (length * (length - 1)) / 2;
+      for (let sum = min; sum <= max; sum++) {
+        const combos = getPartitionsCached(sum, length);
+        if (combos.length === 1) {
+          rows.push({ sum, length, digits: combos[0] });
+        }
+      }
+    }
+    return rows;
+  }, []);
+}
+
 export function Sidebar({ runsInfo }: SidebarProps) {
   const [activeTab, setActiveTab] = useState<'runs' | 'guide'>('runs');
+  const uniquePartitions = useUniquePartitions();
 
   return (
     <div className="panel-card" style={{ flexGrow: 1 }}>
@@ -141,49 +166,18 @@ export function Sidebar({ runsInfo }: SidebarProps) {
       {activeTab === 'guide' && (
         <div className="tutorial-content" style={{ maxHeight: '280px', overflowY: 'auto' }}>
           <p>
-            Learn these crucial <strong>unique partitions</strong> to solve puzzles faster:
+            Learn these crucial <strong>unique partitions</strong> to solve puzzles faster. Each
+            clue below has only one possible set of digits, so the digits are forced:
           </p>
           <div className="combos-list">
-            <div className="combo-item">
-              <span className="combo-clue">Sum 3 (in 2)</span>
-              <span className="combo-vals">1, 2</span>
-            </div>
-            <div className="combo-item">
-              <span className="combo-clue">Sum 4 (in 2)</span>
-              <span className="combo-vals">1, 3</span>
-            </div>
-            <div className="combo-item">
-              <span className="combo-clue">Sum 16 (in 2)</span>
-              <span className="combo-vals">7, 9</span>
-            </div>
-            <div className="combo-item">
-              <span className="combo-clue">Sum 17 (in 2)</span>
-              <span className="combo-vals">8, 9</span>
-            </div>
-            <div className="combo-item">
-              <span className="combo-clue">Sum 6 (in 3)</span>
-              <span className="combo-vals">1, 2, 3</span>
-            </div>
-            <div className="combo-item">
-              <span className="combo-clue">Sum 7 (in 3)</span>
-              <span className="combo-vals">1, 2, 4</span>
-            </div>
-            <div className="combo-item">
-              <span className="combo-clue">Sum 23 (in 3)</span>
-              <span className="combo-vals">6, 8, 9</span>
-            </div>
-            <div className="combo-item">
-              <span className="combo-clue">Sum 24 (in 3)</span>
-              <span className="combo-vals">7, 8, 9</span>
-            </div>
-            <div className="combo-item">
-              <span className="combo-clue">Sum 10 (in 4)</span>
-              <span className="combo-vals">1, 2, 3, 4</span>
-            </div>
-            <div className="combo-item">
-              <span className="combo-clue">Sum 30 (in 4)</span>
-              <span className="combo-vals">6, 7, 8, 9</span>
-            </div>
+            {uniquePartitions.map(({ sum, length, digits }) => (
+              <div className="combo-item" key={`${sum}-${length}`}>
+                <span className="combo-clue">
+                  Sum {sum} (in {length})
+                </span>
+                <span className="combo-vals">{digits.join(', ')}</span>
+              </div>
+            ))}
           </div>
         </div>
       )}

@@ -873,3 +873,32 @@ body {
         transform: translateY(105vh) rotate(720deg);
     }
 }
+
+/*
+ * Respect the OS-level "reduce motion" setting. The confetti burst, the
+ * bouncing trophy and the error shake are decorative, so they are disabled
+ * outright; functional transitions are collapsed to near-zero rather than
+ * removed so hover/focus states still register.
+ */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+
+    .confetti-container {
+        display: none;
+    }
+
+    .victory-icon {
+        animation: none !important;
+    }
+
+    .cell-white.error {
+        animation: none !important;
+    }
+}
