@@ -1,0 +1,113 @@
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { render, screen, cleanup, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import App from './App';
+
+afterEach(cleanup);
+beforeEach(() => localStorage.clear());
+
+/**
+ * Smoke tests that mount the whole App, so a crash-on-boot or a broken
+ * interaction wiring cannot pass CI. These exercise the real engine.
+ */
+describe('App integration', () => {
+  it('mounts and renders a playable board with clues', () => {
+    render(<App />);
+    expect(screen.getByRole('grid', { name: /Kakuro puzzle board/i })).toBeTruthy();
+    const cells = screen.getAllByRole('gridcell', { hidden: true });
+    expect(cells.length).toBeGreaterThan(0);
+    // At least one clue must be rendered, else the board is unplayable.
+    expect(document.querySelectorAll('.clue-val').length).toBeGreaterThan(0);
+  });
+
+  it('selects a cell on click and accepts a typed digit', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    // Find an empty, editable white cell.
+    const empty = Array.from(document.querySelectorAll('.cell-white')).find(
+      el => !el.classList.contains('pre-revealed') && el.querySelector('.notes-container')
+    ) as HTMLElement | undefined;
+    expect(empty).toBeDefined();
+    if (!empty) return;
+
+    await user.click(empty);
+    expect(empty.getAttribute('aria-selected')).toBe('true');
+
+    await user.keyboard('5');
+    expect(empty.querySelector('.cell-value')?.textContent).toBe('5');
+  });
+
+  it('undo reverts a digit entry', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const empty = Array.from(document.querySelectorAll('.cell-white')).find(
+      el => !el.classList.contains('pre-revealed') && el.querySelector('.notes-container')
+    ) as HTMLElement | undefined;
+    if (!empty) return;
+
+    await user.click(empty);
+    await user.keyboard('7');
+    expect(empty.querySelector('.cell-value')?.textContent).toBe('7');
+
+    await user.click(screen.getByRole('button', { name: /undo/i }));
+    expect(empty.querySelector('.cell-value')).toBeNull();
+  });
+
+  it('persists the chosen difficulty across a remount', async () => {
+    const user = userEvent.setup();
+    const first = render(<App />);
+    const select = screen.getByLabelText('Difficulty') as HTMLSelectElement;
+    expect(select.value).toBe('medium');
+
+    // Switch to hard, which starts a new game.
+    await user.selectOptions(select, 'hard');
+    expect((screen.getByLabelText('Difficulty') as HTMLSelectElement).value).toBe('hard');
+
+    // Enter a digit so a game is actually saved, then remount.
+    const empty = Array.from(document.querySelectorAll('.cell-white')).find(
+      el => !el.classList.contains('pre-revealed') && el.querySelector('.notes-container')
+    ) as HTMLElement | undefined;
+    if (empty) {
+      await user.click(empty);
+      await user.keyboard('3');
+    }
+    first.unmount();
+
+    render(<App />);
+    // Regression: difficulty used to be hardcoded to 'medium' on boot, so a
+    // restored hard game reported itself as medium.
+    expect((screen.getByLabelText('Difficulty') as HTMLSelectElement).value).toBe('hard');
+  });
+
+  it('opens the rules dialog and closes it with Escape', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: /rules|how to play/i }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText(/How to Play Kakuro/i)).toBeTruthy();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('asks for confirmation before solving the puzzle', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: /solve/i }));
+    expect(screen.getByRole('alertdialog')).toBeTruthy();
+    // Backing out must leave the board unsolved.
+    await user.click(screen.getByRole('button', { name: /keep playing/i }));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('lists computed unique partitions in the tactics guide', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('tab', { name: /tactics guide/i }));
+    // 3-in-2 => {1,2} is the canonical example and must be present.
+    expect(screen.getByText('Sum 3 (in 2)')).toBeTruthy();
+    // The list is derived, so it is far longer than the old hardcoded ten.
+    expect(document.querySelectorAll('.combo-item').length).toBeGreaterThan(10);
+  });
+});
