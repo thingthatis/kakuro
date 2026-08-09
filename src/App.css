@@ -352,9 +352,23 @@ body {
     animation: shake 0.3s ease-in-out;
 }
 
+.cell-white.pre-revealed {
+    cursor: default;
+    background-image: radial-gradient(circle at center, rgba(245, 158, 11, 0.1), transparent 70%);
+}
+
 .cell-white.pre-revealed .cell-value {
     color: var(--color-warning);
     /* pre-revealed numbers are gold/amber */
+}
+
+.cell-white.pre-revealed::after {
+    content: "";
+    position: absolute;
+    inset: 6px;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: 0.35rem;
+    pointer-events: none;
 }
 
 /* Pencil/Notes Marks */

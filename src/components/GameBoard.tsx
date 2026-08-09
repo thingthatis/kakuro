@@ -154,7 +154,9 @@ function WhiteCellView({
     .join(' ');
 
   const valueText = cell.value !== '' ? String(cell.value) : 'empty';
-  const ariaLabel = `Row ${rIdx + 1}, column ${cIdx + 1}, ${valueText}${hasError ? ', conflict' : ''}`;
+  const ariaLabel = `Row ${rIdx + 1}, column ${cIdx + 1}, ${valueText}${
+    isPreRevealed ? ', pre-filled, read-only' : ''
+  }${hasError ? ', conflict' : ''}`;
 
   return (
     <div

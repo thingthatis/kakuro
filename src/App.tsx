@@ -75,6 +75,15 @@ function generatePuzzleWithPreRevealed(diff: Difficulty): { board: Board; preRev
     return { board, preRevealed };
 }
 
+function findFirstPlayableCell(board: Board, preRevealed: boolean[][]): { r: number; c: number } | null {
+    for (let r = 0; r < board.length; r += 1) {
+        for (let c = 0; c < board[r].length; c += 1) {
+            if (board[r][c].type === 'white' && !preRevealed[r]?.[c]) return { r, c };
+        }
+    }
+    return null;
+}
+
 function App() {
     const [difficulty, setDifficulty] = useState<Difficulty>('medium');
     const initial = useMemo(() => {
@@ -106,7 +115,9 @@ function App() {
 
     const [board, setBoard] = useState<Board>(initial.board);
     const [preRevealed, setPreRevealed] = useState<boolean[][]>(initial.preRevealed);
-    const [selectedCell, setSelectedCell] = useState<{ r: number; c: number } | null>(null);
+    const [selectedCell, setSelectedCell] = useState<{ r: number; c: number } | null>(() =>
+        findFirstPlayableCell(initial.board, initial.preRevealed)
+    );
     const [editDirection, setEditDirection] = useState<'h' | 'v'>(initial.editDirection);
     const [pencilMode, setPencilMode] = useState<boolean>(initial.pencilMode);
     const [isWon, setIsWon] = useState<boolean>(false);
@@ -169,7 +180,7 @@ function App() {
             const { board: newBoard, preRevealed: newPre } = generatePuzzleWithPreRevealed(diff);
             setBoard(newBoard);
             setPreRevealed(newPre);
-            setSelectedCell(null);
+            setSelectedCell(findFirstPlayableCell(newBoard, newPre));
             setTimer(0);
             setTimerActive(true);
             setHintsUsed(0);
@@ -262,7 +273,7 @@ function App() {
             if (!selectedCell || isWon) return;
             const { r, c } = selectedCell;
             const cell = board[r][c];
-            if (cell.type !== 'white') return;
+            if (cell.type !== 'white' || preRevealed[r]?.[c]) return;
 
             if (pencilMode && val !== '') {
                 saveUndoState(board);
@@ -312,7 +323,7 @@ function App() {
                 return next;
             });
         },
-        [selectedCell, isWon, pencilMode, board, saveUndoState, triggerWin, showErrorsMode, playSound]
+        [selectedCell, isWon, pencilMode, board, preRevealed, saveUndoState, triggerWin, showErrorsMode, playSound]
     );
 
     const navigateGrid = useCallback(
@@ -409,7 +420,7 @@ function App() {
         if (!selectedCell || isWon) return;
         const { r, c } = selectedCell;
         const cell = board[r][c];
-        if (cell.type !== 'white') return;
+        if (cell.type !== 'white' || preRevealed[r]?.[c]) return;
         if (cell.value === cell.correctValue) return;
 
         saveUndoState(board);
@@ -430,7 +441,7 @@ function App() {
             if (winCheck.isWin) setTimeout(() => triggerWin(), 10);
             return next;
         });
-    }, [selectedCell, isWon, board, saveUndoState, playSound, triggerWin]);
+    }, [selectedCell, isWon, board, preRevealed, saveUndoState, playSound, triggerWin]);
 
     const handleSolvePuzzle = useCallback(() => {
         if (isWon) return;
@@ -539,7 +550,7 @@ function App() {
                         onToggleErrors={() => setShowErrorsMode(e => !e)}
                         showErrors={showErrorsMode}
                         onHint={handleHint}
-                        hintDisabled={!selectedCell || isWon}
+                        hintDisabled={!selectedCell || isWon || (selectedCell ? preRevealed[selectedCell.r]?.[selectedCell.c] : false)}
                         onSolveRequest={() => setShowSolveConfirm(true)}
                         solveDisabled={isWon}
                     />
@@ -564,7 +575,7 @@ function App() {
                             playSound('select');
                         }}
                         onInput={handleCellInput}
-                        disabled={isWon || !selectedCell}
+                        disabled={isWon || !selectedCell || (selectedCell ? preRevealed[selectedCell.r]?.[selectedCell.c] : false)}
                     />
                     <Sidebar runsInfo={runsInfo} />
                 </aside>
