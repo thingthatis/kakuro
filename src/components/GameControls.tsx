@@ -1,4 +1,4 @@
-import { RotateCcw, RotateCw, RefreshCw, Eye, Lightbulb, Sparkles } from 'lucide-react';
+import { RotateCcw, RotateCw, RefreshCw, Eye, Lightbulb, Sparkles, Share2, Calendar } from 'lucide-react';
 
 interface GameControlsProps {
   timer: number;
@@ -17,6 +17,8 @@ interface GameControlsProps {
   hintDisabled: boolean;
   onSolveRequest: () => void;
   solveDisabled: boolean;
+  onShare: () => void;
+  onDaily: () => void;
 }
 
 export function GameControls(props: GameControlsProps) {
@@ -73,7 +75,7 @@ export function GameControls(props: GameControlsProps) {
           <RefreshCw size={18} />
         </button>
       </div>
-      <div style={{ display: 'flex', gap: '0.75rem', width: '100%', justifyContent: 'space-between' }}>
+      <div style={{ display: 'flex', gap: '0.75rem', width: '100%', justifyContent: 'space-between', flexWrap: 'wrap' }}>
         <button
           className="btn"
           onClick={props.onToggleErrors}
@@ -83,7 +85,25 @@ export function GameControls(props: GameControlsProps) {
           <Eye size={16} />
           {props.showErrors ? 'Hide Conflicts' : 'Show Conflicts'}
         </button>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <button
+            className="btn"
+            onClick={props.onShare}
+            title="Copy a link to this puzzle"
+            aria-label="Share this puzzle"
+          >
+            <Share2 size={16} />
+            Share
+          </button>
+          <button
+            className="btn"
+            onClick={props.onDaily}
+            title="Load today's daily challenge"
+            aria-label="Start today's daily challenge"
+          >
+            <Calendar size={16} />
+            Daily
+          </button>
           <button
             className="btn"
             onClick={props.onHint}

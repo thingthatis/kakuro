@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
-import { ChevronRight } from 'lucide-react';
-import { getPartitionsCached } from '../hooks/usePartitions';
+import { ChevronRight, Sparkles } from 'lucide-react';
+import { getPartitionsCached } from '../partitions';
 
 interface RunInfo {
   currentSum: number;
@@ -11,8 +11,15 @@ interface RunInfo {
   combos: number[][];
 }
 
+interface Candidates {
+  horizontal: number[];
+  vertical: number[];
+  both: number[];
+  isEmpty: boolean;
+}
+
 interface SidebarProps {
-  runsInfo: { h: RunInfo; v: RunInfo } | null;
+  runsInfo: { h: RunInfo; v: RunInfo; candidates: Candidates } | null;
 }
 
 /**
@@ -146,6 +153,72 @@ export function Sidebar({ runsInfo }: SidebarProps) {
                   </div>
                 </div>
               )}
+
+              {/* Smart candidates: digits consistent with the current state
+                  of both runs (digits already placed in either run are
+                  pruned). Highlighted when only one digit survives — that's
+                  a forced single, the engine's most direct hint. */}
+              {(() => {
+                const c = runsInfo.candidates;
+                if (c.isEmpty) return null;
+                return (
+                  <div className="candidates-panel">
+                    <div className="candidates-header">
+                      <Sparkles size={14} className="text-purple-400" />
+                      <span>Smart candidates</span>
+                    </div>
+                    <div className="candidates-row">
+                      <span className="candidates-label">Row:</span>
+                      <div className="candidates-digits">
+                        {c.horizontal.length === 0 ? (
+                          <span className="candidates-none">none</span>
+                        ) : (
+                          c.horizontal.map(d => (
+                            <span key={d} className="candidate-digit">
+                              {d}
+                            </span>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                    <div className="candidates-row">
+                      <span className="candidates-label">Col:</span>
+                      <div className="candidates-digits">
+                        {c.vertical.length === 0 ? (
+                          <span className="candidates-none">none</span>
+                        ) : (
+                          c.vertical.map(d => (
+                            <span key={d} className="candidate-digit">
+                              {d}
+                            </span>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                    <div className="candidates-row both">
+                      <span className="candidates-label">Both:</span>
+                      <div className="candidates-digits">
+                        {c.both.length === 0 ? (
+                          <span className="candidates-none">none — board is in an invalid state</span>
+                        ) : c.both.length === 1 ? (
+                          <span className="candidate-digit forced">{c.both[0]}</span>
+                        ) : (
+                          c.both.map(d => (
+                            <span key={d} className="candidate-digit">
+                              {d}
+                            </span>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                    {c.both.length === 1 && (
+                      <div className="candidates-hint">
+                        Forced by cross-run elimination.
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </>
           ) : (
             <p

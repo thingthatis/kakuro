@@ -954,6 +954,84 @@ export function getRunStatus(
 }
 
 /**
+ * Returns the set of digits that can legally be placed in `(r, c)` given the
+ * current contents of the two runs the cell belongs to.
+ *
+ * For each run, every valid combination of distinct digits that sums to the
+ * run's target is enumerated, any combo that collides with a digit already
+ * placed in that run is discarded, and the union of surviving combos is the
+ * per-direction candidate set. The cell must satisfy both runs, so the
+ * `both` field is the intersection.
+ *
+ * A digit that appears in `both` is a forced-elimination candidate — the
+ * only way the puzzle can still be solved is if the cell takes that digit.
+ * An empty `both` set means the cell has no legal move from the current
+ * position; the player has painted themselves into a corner.
+ */
+export function getCandidatesForCell(
+  board: Board,
+  r: number,
+  c: number
+): { horizontal: number[]; vertical: number[]; both: number[]; isEmpty: boolean } {
+  const empty = { horizontal: [], vertical: [], both: [], isEmpty: true };
+  if (r < 0 || r >= board.length || c < 0 || c >= board[0].length) return empty;
+  const cell = board[r][c];
+  if (cell.type !== 'white') return empty;
+
+  const hStatus = getRunStatus(board, r, c, 'h');
+  const vStatus = getRunStatus(board, r, c, 'v');
+
+  const candidatesForRun = (targetSum: number, length: number, used: Set<number>): Set<number> => {
+    if (targetSum <= 0 || length <= 0) return new Set();
+    const out = new Set<number>();
+    // For each candidate digit d: simulate the run with d in this cell and
+    // check whether the rest of the run is still satisfiable. This is the
+    // correct formulation — enumerating full partitions and filtering on
+    // overlap misses "the only combo is {d, 4}, 4 is already placed" cases.
+    const usedSum = [...used].reduce((s, v) => s + v, 0);
+    for (let d = 1; d <= 9; d++) {
+      if (used.has(d)) continue;
+      const trialUsed = new Set(used);
+      trialUsed.add(d);
+      if (isRunWithinRange(usedSum + d, length, targetSum, trialUsed)) {
+        out.add(d);
+      }
+    }
+    return out;
+  };
+
+  // Already-placed digits in each run, excluding the selected cell itself.
+  const collectUsed = (direction: Direction): Set<number> => {
+    const { runCoords } = locateRun(board, r, c, direction);
+    const used = new Set<number>();
+    for (const coord of runCoords) {
+      if (coord.r === r && coord.c === c) continue;
+      const v = board[coord.r][coord.c];
+      if (v.type === 'white' && v.value !== '') used.add(v.value);
+    }
+    return used;
+  };
+
+  const hSet = candidatesForRun(hStatus.targetSum, hStatus.count, collectUsed('h'));
+  const vSet = candidatesForRun(vStatus.targetSum, vStatus.count, collectUsed('v'));
+  const both = new Set<number>();
+  for (const d of hSet) if (vSet.has(d)) both.add(d);
+
+  // The cell is "empty" if both direction sets are empty — happens when the
+  // board is in an invalid state (e.g. after the user has placed conflicting
+  // digits). UI can treat that as "no help available".
+  const isEmpty = hSet.size === 0 && vStatus.targetSum > 0 ||
+                  vSet.size === 0 && hStatus.targetSum > 0;
+
+  return {
+    horizontal: [...hSet].sort((a, b) => a - b),
+    vertical: [...vSet].sort((a, b) => a - b),
+    both: [...both].sort((a, b) => a - b),
+    isEmpty,
+  };
+}
+
+/**
  * Computes the per-run completion state for every clue-bearing black cell in
  * one pass, so the UI does not re-walk each run per cell per render.
  * Keyed `${r},${c}` of the black host cell.
@@ -996,4 +1074,307 @@ export function computeClueStatuses(board: Board): Map<
   }
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Seeded generation and shareable puzzle codes
+// ---------------------------------------------------------------------------
+
+/**
+ * A small, fast, deterministic PRNG. Mulberry32 — 32-bit state, good enough
+ * for shuffling and tie-breaking. NOT cryptographically secure.
+ *
+ * Used by the seeded generator so a daily challenge is reproducible: every
+ * browser that sees the same seed produces the same puzzle.
+ */
+export function createRng(seed: number): () => number {
+  let s = seed | 0;
+  if (s === 0) s = 1;
+  return () => {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Hash a string seed to a 32-bit integer, the way createRng expects. */
+export function hashStringSeed(s: string): number {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h | 0;
+}
+
+/**
+ * Seeded puzzle generation. Like `generateKakuroPuzzle` but deterministic: two
+ * calls with the same `seed` and `difficulty` produce the same puzzle (same
+ * layout, same solution, same givens).
+ *
+ * The engine's randomness sources — `Math.random` for the layout backtrack
+ * order, the per-removal shuffle during uniqueness digging, the digit order
+ * during solving — are replaced by a single seeded PRNG. The result is then
+ * filtered through the same uniqueness gate.
+ */
+export function generateSeededPuzzle(
+  seed: number,
+  difficulty: Difficulty
+): { board: Board; solution: number[][]; preRevealed: boolean[][] } {
+  const rng = createRng(seed);
+  const originalRandom = Math.random;
+  Math.random = rng;
+  try {
+    // tryGenerate calls itself up to MAX_OUTER times if a layout is bad.
+    // We deliberately keep that loop but the inner search is now
+    // deterministic, so we just take the first successful result.
+    for (let attempt = 0; attempt < 25; attempt++) {
+      const result = tryGenerate(difficulty);
+      if (result) return result;
+    }
+    // Extremely unlikely with a fresh PRNG; fall back to non-deterministic
+    // generation so the user still gets a playable puzzle.
+    return generateKakuroPuzzle(difficulty);
+  } finally {
+    Math.random = originalRandom;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shareable puzzle codes
+// ---------------------------------------------------------------------------
+
+/**
+ * A self-contained snapshot of a puzzle that can be encoded as a short
+ * string and decoded back. Used by the share button: the same code always
+ * recreates the same board, solution, givens, and difficulty.
+ */
+export interface PuzzleSnapshot {
+  difficulty: Difficulty;
+  board: Board;
+  solution: number[][];
+  preRevealed: boolean[][];
+}
+
+const SHARE_MAGIC = 0x4B31; // "K1" packed as 16 bits, MSB first
+
+/**
+ * Encodes a puzzle to a URL-safe base64 string.
+ *
+ * Layout (version 1, K1):
+ *   byte  0  : 'K' = 0x4B
+ *   byte  1  : '1' = 0x31 (version)
+ *   byte  2  : grid size (7, 9, or 11)
+ *   byte  3  : difficulty (1=easy, 2=medium, 3=hard)
+ *   bytes 4..(4+ceil(N*N/8)-1) : layout bitmap, 1 bit per cell (0=B, 1=W)
+ *   then, in row-major order, for each WHITE cell:
+ *     4 bits digit-1 (so 0..8 representing 1..9)
+ *     1 bit pre-revealed
+ *
+ * The maximum is 11*11 = 121 layout bits (16 bytes) + 121*5 = 605 bits (76
+ * bytes) = 96 bytes total. base64 of that is 128 characters.
+ */
+export function serializePuzzle(snapshot: PuzzleSnapshot): string {
+  const { difficulty, board, solution, preRevealed } = snapshot;
+  const h = board.length;
+  const w = board[0].length;
+  if (h !== w) throw new Error('serializePuzzle expects a square board');
+  if (h < 2 || h > 15) throw new Error(`Unsupported grid size: ${h}`);
+
+  // Bit packer: write each integer as `bits` MSB-first bits.
+  const bits: number[] = [];
+  const writeBits = (v: number, n: number) => {
+    for (let i = n - 1; i >= 0; i--) bits.push((v >> i) & 1);
+  };
+
+  // Magic "K1" = 0x4B 0x31 packed as 16 bits, MSB first.
+  writeBits((SHARE_MAGIC >> 8) & 0xff, 8);
+  writeBits(SHARE_MAGIC & 0xff, 8);
+  writeBits(h, 8);
+  writeBits(difficultyToCode(difficulty), 8);
+
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < w; c++) {
+      writeBits(board[r][c].type === 'white' ? 1 : 0, 1);
+    }
+  }
+
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < w; c++) {
+      if (board[r][c].type !== 'white') continue;
+      const digit = solution[r][c];
+      if (digit < 1 || digit > 9) {
+        throw new Error(`Bad solution digit at (${r},${c}): ${digit}`);
+      }
+      writeBits(digit - 1, 4);
+      writeBits(preRevealed[r]?.[c] ? 1 : 0, 1);
+    }
+  }
+
+  // Pad to a whole number of bytes.
+  while (bits.length % 8 !== 0) bits.push(0);
+  const bytes = new Uint8Array(bits.length / 8);
+  for (let i = 0; i < bytes.length; i++) {
+    let b = 0;
+    for (let j = 0; j < 8; j++) b = (b << 1) | bits[i * 8 + j];
+    bytes[i] = b;
+  }
+  return bytesToB64Url(bytes);
+}
+
+/**
+ * Inverse of `serializePuzzle`. Returns null when the input is unrecognised
+ * or corrupt so callers can show a friendly error instead of throwing.
+ */
+export function deserializePuzzle(code: string): PuzzleSnapshot | null {
+  try {
+    const bytes = b64UrlToBytes(code);
+    if (bytes.length < 4) return null;
+
+    // Bit-position reader: write is byte-aligned nibbles then MSB-first bits;
+    // read in the same order. All offsets here are bit positions, not bytes.
+    let p = 0;
+    const readBits = (n: number): number => {
+      let v = 0;
+      for (let i = 0; i < n; i++) {
+        const byte = bytes[p >> 3];
+        const bit = (byte >> (7 - (p & 7))) & 1;
+        v = (v << 1) | bit;
+        p++;
+      }
+      return v;
+    };
+
+    // Magic is "K1" = 0x4B 0x31. Read as one 16-bit value for compactness.
+    const magicBits = readBits(16);
+    if (magicBits !== ((0x4B << 8) | 0x31)) return null;
+
+    const size = readBits(8);
+    const diffCode = readBits(8);
+    if (size < 2 || size > 15) return null;
+    const difficulty = codeToDifficulty(diffCode);
+    if (!difficulty) return null;
+
+    const layoutBits: number[] = [];
+    for (let i = 0; i < size * size; i++) {
+      layoutBits.push(readBits(1));
+    }
+
+    const board: Board = Array.from({ length: size }, () => []);
+    const solution: number[][] = Array.from({ length: size }, () => Array(size).fill(0));
+    const preRevealed: boolean[][] = Array.from({ length: size }, () => Array(size).fill(false));
+
+    for (let r = 0; r < size; r++) {
+      for (let c = 0; c < size; c++) {
+        const isWhite = layoutBits[r * size + c] === 1;
+        if (!isWhite) {
+          board[r][c] = { type: 'black' };
+          continue;
+        }
+        const digit = readBits(4) + 1;
+        const pre = readBits(1) === 1;
+        solution[r][c] = digit;
+        preRevealed[r][c] = pre;
+        board[r][c] = {
+          type: 'white',
+          value: pre ? digit : '',
+          correctValue: digit,
+          notes: [],
+        };
+      }
+    }
+
+    reDeriveCluesFromSolution(board, solution);
+    return { difficulty, board, solution, preRevealed };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reconstructs every clue cell's `clueRight` and `clueDown` from the
+ * (board, solution) pair after deserialization. The encoder doesn't store
+ * clues — they fall out of the solution and the board's black-cell pattern
+ * for free, and re-deriving keeps the wire format small.
+ */
+function reDeriveCluesFromSolution(board: Board, solution: number[][]): void {
+  const h = board.length;
+  const w = board[0].length;
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < w; c++) {
+      if (board[r][c].type !== 'black') continue;
+      const host = board[r][c] as BlackCell;
+      if (c + 1 < w && board[r][c + 1].type === 'white') {
+        let sum = 0;
+        let cc = c + 1;
+        while (cc < w && board[r][cc].type === 'white') {
+          sum += solution[r][cc];
+          cc++;
+        }
+        host.clueRight = sum;
+      }
+      if (r + 1 < h && board[r + 1][c].type === 'white') {
+        let sum = 0;
+        let rr = r + 1;
+        while (rr < h && board[rr][c].type === 'white') {
+          sum += solution[rr][c];
+          rr++;
+        }
+        host.clueDown = sum;
+      }
+    }
+  }
+}
+
+function difficultyToCode(d: Difficulty): number {
+  return d === 'easy' ? 1 : d === 'medium' ? 2 : 3;
+}
+
+function codeToDifficulty(n: number): Difficulty | null {
+  if (n === 1) return 'easy';
+  if (n === 2) return 'medium';
+  if (n === 3) return 'hard';
+  return null;
+}
+
+const B64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+function bytesToB64Url(bytes: Uint8Array): string {
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i];
+    const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
+    const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+    out += B64URL_ALPHABET[b0 >> 2];
+    out += B64URL_ALPHABET[((b0 & 0x3) << 4) | (b1 >> 4)];
+    if (i + 1 < bytes.length) out += B64URL_ALPHABET[((b1 & 0xf) << 2) | (b2 >> 6)];
+    if (i + 2 < bytes.length) out += B64URL_ALPHABET[b2 & 0x3f];
+  }
+  return out;
+}
+
+function b64UrlToBytes(s: string): Uint8Array {
+  // Reverse lookup. Build once per call; this isn't on a hot path.
+  const lookup = new Int8Array(128).fill(-1);
+  for (let i = 0; i < B64URL_ALPHABET.length; i++) {
+    lookup[B64URL_ALPHABET.charCodeAt(i)] = i;
+  }
+  // Strip any padding (we don't generate it).
+  s = s.replace(/=+$/, '');
+  const outLen = Math.floor((s.length * 6) / 8);
+  const out = new Uint8Array(outLen);
+  let bi = 0;
+  for (let i = 0; i < s.length; i += 4) {
+    const c0 = lookup[s.charCodeAt(i)];
+    const c1 = lookup[s.charCodeAt(i + 1)];
+    const c2 = i + 2 < s.length ? lookup[s.charCodeAt(i + 2)] : -1;
+    const c3 = i + 3 < s.length ? lookup[s.charCodeAt(i + 3)] : -1;
+    if (c0 < 0 || c1 < 0) throw new Error('bad b64 char');
+    out[bi++] = (c0 << 2) | (c1 >> 4);
+    if (c2 >= 0) out[bi++] = ((c1 & 0xf) << 4) | (c2 >> 2);
+    if (c3 >= 0) out[bi++] = ((c2 & 0x3) << 6) | c3;
+  }
+  return out;
 }

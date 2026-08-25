@@ -51,7 +51,7 @@ describe('App integration', () => {
     expect(banner?.textContent?.length ?? 0).toBeGreaterThan(0);
 
     // The live region mirrors the hint for screen readers.
-    expect(screen.getByRole('status')?.textContent).toBe(banner?.querySelector('span')?.textContent);
+    expect(document.querySelector('.sr-only[role="status"]')?.textContent).toBe(banner?.querySelector('span')?.textContent);
   });
 
   it('undo reverts a digit entry', async () => {
@@ -125,5 +125,55 @@ describe('App integration', () => {
     expect(screen.getByText('Sum 3 (in 2)')).toBeTruthy();
     // The list is derived, so it is far longer than the old hardcoded ten.
     expect(document.querySelectorAll('.combo-item').length).toBeGreaterThan(10);
+  });
+
+  it('auto-prunes pencil marks when a digit is placed in the same run', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    // Find two empty, editable white cells that are in the same Kakuro run
+    // (maximal white sequence, not just same CSS row — black cells in the
+    // row would put them in different runs and the prune should not fire).
+    const rows = Array.from(document.querySelectorAll('.grid-row'));
+    let pair: [HTMLElement, HTMLElement] | null = null;
+    for (const row of rows) {
+      const cellsInRow = Array.from(row.querySelectorAll('.cell-white')).filter(
+        el => !el.classList.contains('pre-revealed') && el.querySelector('.notes-container')
+      ) as HTMLElement[];
+      // Group adjacent white cells — a group is a Kakuro run.
+      for (let i = 0; i + 1 < cellsInRow.length && !pair; i++) {
+        const a = cellsInRow[i];
+        const b = cellsInRow[i + 1];
+        // Adjacent in DOM = same row, no black cell between them in the row.
+        pair = [a, b];
+      }
+      if (pair) break;
+    }
+    if (!pair) {
+      // The default board is generated at medium difficulty, which has
+      // plenty of two-cell runs. If we never found one, something is off.
+      throw new Error('Test setup: no adjacent editable cells found in any run');
+    }
+
+    const [first, second] = pair;
+
+    // Enable pencil mode and write a note "3" in the first cell.
+    await user.click(first);
+    await user.keyboard('n');
+    await user.keyboard('3');
+    const notesAfter = first.querySelectorAll('.note-mark');
+    const noteText = Array.from(notesAfter).map(n => n.textContent).join('');
+    expect(noteText).toContain('3');
+
+    // Disable pencil and place "3" in the second cell (same run).
+    await user.keyboard('n');
+    await user.click(second);
+    await user.keyboard('3');
+
+    // The first cell's "3" pencil mark should have been pruned, because the
+    // two cells share a run and a digit cannot repeat within a run.
+    const notesAfter2 = first.querySelectorAll('.note-mark');
+    const noteText2 = Array.from(notesAfter2).map(n => n.textContent).join('');
+    expect(noteText2).not.toContain('3');
   });
 });

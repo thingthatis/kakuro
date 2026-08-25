@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   generateKakuroPuzzle,
+  generateSeededPuzzle,
   generateLayout,
   validateLayout,
   buildRunIndex,
@@ -9,6 +10,9 @@ import {
   getRunStatus,
   computeClueStatuses,
   getHint,
+  getCandidatesForCell,
+  serializePuzzle,
+  deserializePuzzle,
   type Board,
   type WhiteCell,
   type BlackCell,
@@ -493,5 +497,220 @@ describe('getHint', () => {
     if (hint.kind === 'single') {
       expect(hint.value).not.toBe(5);
     }
+  });
+});
+
+describe('getCandidatesForCell', () => {
+  it('returns the full digit set on a fully empty single-run board', () => {
+    // 3-in-2 has exactly one partition: {1,2}.
+    const board: Board = [
+      [
+        { type: 'black', clueRight: 3 },
+        { type: 'white', value: '', correctValue: 1, notes: [] },
+        { type: 'white', value: '', correctValue: 2, notes: [] },
+        { type: 'black' },
+      ],
+    ];
+    const c = getCandidatesForCell(board, 0, 1);
+    expect(c.horizontal.sort()).toEqual([1, 2]);
+  });
+
+  it('eliminates a digit already placed in the same run', () => {
+    // 5-in-2 partitions: {1,4}, {2,3}. With "4" already placed at (0,1),
+    // the only legal digit for (0,2) is 1.
+    const board: Board = [
+      [
+        { type: 'black', clueRight: 5 },
+        { type: 'white', value: 4, correctValue: 4, notes: [] },
+        { type: 'white', value: '', correctValue: 1, notes: [] },
+        { type: 'black' },
+      ],
+    ];
+    const c = getCandidatesForCell(board, 0, 2);
+    expect(c.horizontal).toEqual([1]);
+  });
+
+  it('intersects horizontal and vertical candidates', () => {
+    // 6-in-2 horizontal at (1,1)-(1,2): valid digits are 1..5 (any of 1,2,3,4,5
+    // is satisfiable). 9-in-2 vertical at (1,1)-(2,1): valid digits are 1..8.
+    // Intersection = {1,2,3,4,5}.
+    const board: Board = [
+      [
+        { type: 'black' },
+        { type: 'black', clueRight: 6, clueDown: 9 },
+        { type: 'black' },
+      ],
+      [
+        { type: 'black', clueRight: 6 },
+        { type: 'white', value: '', correctValue: 5, notes: [] },
+        { type: 'white', value: '', correctValue: 1, notes: [] },
+        { type: 'black' },
+      ],
+      [
+        { type: 'black' },
+        { type: 'white', value: '', correctValue: 4, notes: [] },
+        { type: 'white', value: '', correctValue: 5, notes: [] },
+        { type: 'black' },
+      ],
+      [
+        { type: 'black' },
+        { type: 'black' },
+        { type: 'black' },
+      ],
+    ];
+    const c = getCandidatesForCell(board, 1, 1);
+    expect(c.horizontal.sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5]);
+    expect(c.vertical.sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(c.both).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it('returns empty candidates for a non-white cell', () => {
+    const { board } = generateKakuroPuzzle('easy');
+    const c = getCandidatesForCell(board, 0, 0);
+    expect(c.isEmpty).toBe(true);
+    expect(c.both).toEqual([]);
+  });
+
+  it('produces a single-digit "both" set when the cell is forced', () => {
+    // 5-in-2 row at (1,1)-(1,2): partitions {1,4}, {2,3}. With 4 already
+    // placed at (1,2), only digit 1 leaves the row satisfiable.
+    // 4-in-2 column at (1,1)-(2,1): partitions {1,3}. With 3 already placed
+    // at (2,1), only digit 1 leaves the column satisfiable.
+    // So (1,1) is forced to 1 by cross-run elimination.
+    const board: Board = [
+      [
+        { type: 'black' },
+        { type: 'black', clueRight: 5, clueDown: 4 },
+        { type: 'black' },
+      ],
+      [
+        { type: 'black', clueRight: 5 },
+        { type: 'white', value: '', correctValue: 1, notes: [] },
+        { type: 'white', value: 4, correctValue: 4, notes: [] },
+        { type: 'black' },
+      ],
+      [
+        { type: 'black' },
+        { type: 'white', value: 3, correctValue: 3, notes: [] },
+        { type: 'white', value: '', correctValue: 1, notes: [] },
+        { type: 'black' },
+      ],
+    ];
+    const c = getCandidatesForCell(board, 1, 1);
+    expect(c.horizontal).toEqual([1]);
+    expect(c.vertical).toEqual([1]);
+    expect(c.both).toEqual([1]);
+  });
+});
+
+describe('serializePuzzle / deserializePuzzle', () => {
+  it('round-trips a generated puzzle', () => {
+    for (const d of ['easy', 'medium', 'hard'] as const) {
+      const { board, solution, preRevealed } = generateKakuroPuzzle(d);
+      const snapshot = { difficulty: d, board, solution, preRevealed };
+      const code = serializePuzzle(snapshot);
+      const back = deserializePuzzle(code);
+      expect(back).not.toBeNull();
+      if (!back) continue;
+      expect(back.difficulty).toBe(d);
+      expect(back.board.length).toBe(board.length);
+      // Compare the solution via the deserialized cell.correctValue.
+      for (let r = 0; r < board.length; r++) {
+        for (let c = 0; c < board[r].length; c++) {
+          const orig = board[r][c];
+          const rest = back.board[r][c];
+          if (orig.type === 'white' && rest.type === 'white') {
+            expect(rest.correctValue).toBe(orig.correctValue);
+            expect(rest.value).toBe(orig.value);
+          } else {
+            expect(rest.type).toBe(orig.type);
+          }
+        }
+      }
+      // preRevealed agrees
+      for (let r = 0; r < preRevealed.length; r++) {
+        for (let c = 0; c < preRevealed[r].length; c++) {
+          expect(back.preRevealed[r][c]).toBe(preRevealed[r][c]);
+        }
+      }
+    }
+  });
+
+  it('produces a share code of reasonable size', () => {
+    const { board, solution, preRevealed } = generateKakuroPuzzle('hard');
+    const code = serializePuzzle({ difficulty: 'hard', board, solution, preRevealed });
+    // Hard is the worst case: 11x11. Expect well under 200 chars.
+    expect(code.length).toBeLessThan(200);
+  });
+
+  it('rejects garbage input gracefully', () => {
+    expect(deserializePuzzle('')).toBeNull();
+    expect(deserializePuzzle('not-a-real-code')).toBeNull();
+    expect(deserializePuzzle('AAAA')).toBeNull();
+  });
+
+  it('preserves the clue values through the round-trip', () => {
+    const { board, solution, preRevealed } = generateKakuroPuzzle('medium');
+    const back = deserializePuzzle(
+      serializePuzzle({ difficulty: 'medium', board, solution, preRevealed })
+    );
+    expect(back).not.toBeNull();
+    if (!back) return;
+    for (let r = 0; r < board.length; r++) {
+      for (let c = 0; c < board[r].length; c++) {
+        const a = board[r][c] as { clueRight?: number; clueDown?: number };
+        const b = back.board[r][c] as { clueRight?: number; clueDown?: number };
+        if (a.clueRight !== undefined) expect(b.clueRight).toBe(a.clueRight);
+        if (a.clueDown !== undefined) expect(b.clueDown).toBe(a.clueDown);
+      }
+    }
+  });
+});
+
+describe('generateSeededPuzzle', () => {
+  it('is deterministic for the same seed', () => {
+    const a = generateSeededPuzzle(0x12345678, 'medium');
+    const b = generateSeededPuzzle(0x12345678, 'medium');
+    // Board layouts should be identical.
+    for (let r = 0; r < a.board.length; r++) {
+      for (let c = 0; c < a.board[r].length; c++) {
+        expect(a.board[r][c].type).toBe(b.board[r][c].type);
+        const ac = a.board[r][c];
+        const bc = b.board[r][c];
+        if (ac.type === 'white' && bc.type === 'white') {
+          expect(ac.correctValue).toBe(bc.correctValue);
+        }
+      }
+    }
+  });
+
+  it('produces a playable puzzle (one solution) for each difficulty', () => {
+    for (const d of ['easy', 'medium', 'hard'] as const) {
+      const { board } = generateSeededPuzzle(0xC0FFEE ^ d.length, d);
+      const idx = buildRunIndex(board);
+      const n = countSolutions(board, idx.cellToHRun, idx.cellToVRun, idx.runTargetSum);
+      expect(n).toBe(1);
+    }
+  });
+
+  it('produces different puzzles for different seeds', () => {
+    const a = generateSeededPuzzle(1, 'medium');
+    const b = generateSeededPuzzle(2, 'medium');
+    // Hard to assert without collision, so check that at least one digit
+    // differs in the solution. With 49 white cells the chance of an exact
+    // match by accident is 9^49, effectively zero.
+    let differs = false;
+    for (let r = 0; r < a.board.length && !differs; r++) {
+      for (let c = 0; c < a.board[r].length && !differs; c++) {
+        const ac = a.board[r][c];
+        const bc = b.board[r][c];
+        if (ac.type === 'white' && bc.type === 'white') {
+          if (ac.correctValue !== bc.correctValue) differs = true;
+        } else if (ac.type !== bc.type) {
+          differs = true;
+        }
+      }
+    }
+    expect(differs).toBe(true);
   });
 });

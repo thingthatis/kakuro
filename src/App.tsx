@@ -1,16 +1,22 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
     generateKakuroPuzzle,
+    generateSeededPuzzle,
     checkWinCondition,
     getRunStatus,
     computeClueStatuses,
     getHint,
+    getCandidatesForCell,
+    serializePuzzle,
+    deserializePuzzle,
+    hashStringSeed,
+    type PuzzleSnapshot,
 } from './kakuroEngine';
 import type { Board, WhiteCell } from './kakuroEngine';
 import type { Difficulty } from './types';
 import { useAudio } from './hooks/useAudio';
 import { useRunStatus } from './hooks/useRunStatus';
-import { getPartitionsCached } from './hooks/usePartitions';
+import { getPartitionsCached } from './partitions';
 import {
     loadState,
     saveState,
@@ -28,6 +34,9 @@ import { Sidebar } from './components/Sidebar';
 import { RulesModal } from './components/RulesModal';
 import { VictoryModal } from './components/VictoryModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { ShareModal } from './components/ShareModal';
+import { Toast } from './components/Toast';
+import { useToast } from './components/toast-state';
 import './App.css';
 
 interface BoardStateSnapshot {
@@ -78,6 +87,52 @@ function generatePuzzleWithPreRevealed(diff: Difficulty): { board: Board; preRev
     return { board, preRevealed };
 }
 
+/**
+ * Returns a new board with the placed digit removed from the pencil marks of
+ * every other cell in the placed cell's two runs. This keeps the player's
+ * notes honest without making them manually delete every collision.
+ *
+ * Pure: returns a new board, does not mutate. The pencil set of the cell
+ * itself is wiped because the digit replaces it.
+ *
+ * "Same run" is a maximal white sequence — two cells in the same grid row
+ * can be in *different* runs if a black cell sits between them, so we walk
+ * the row/column to confirm.
+ */
+function pruneNotesAfterPlacement(board: Board, r: number, c: number, val: number): Board {
+  const w = board[0].length;
+  const h = board.length;
+
+  // Find the horizontal run containing (r, c).
+  let hStart = c;
+  while (hStart > 0 && board[r][hStart - 1].type === 'white') hStart--;
+  let hEnd = c;
+  while (hEnd < w - 1 && board[r][hEnd + 1].type === 'white') hEnd++;
+  const inHRun = (rr: number, cc: number) =>
+    rr === r && cc >= hStart && cc <= hEnd;
+
+  // Find the vertical run containing (r, c).
+  let vStart = r;
+  while (vStart > 0 && board[vStart - 1][c].type === 'white') vStart--;
+  let vEnd = r;
+  while (vEnd < h - 1 && board[vEnd + 1][c].type === 'white') vEnd++;
+  const inVRun = (rr: number, cc: number) =>
+    cc === c && rr >= vStart && rr <= vEnd;
+
+  return board.map((row, rr) =>
+    row.map((cell, cc) => {
+      if (cell.type !== 'white') return cell;
+      if (rr === r && cc === c) {
+        return { ...cell, notes: [] } as WhiteCell;
+      }
+      if (!inHRun(rr, cc) && !inVRun(rr, cc)) return cell;
+      const notes = cell.notes || [];
+      if (!notes.includes(val)) return cell;
+      return { ...cell, notes: notes.filter(n => n !== val) } as WhiteCell;
+    })
+  );
+}
+
 function findFirstPlayableCell(board: Board, preRevealed: boolean[][]): { r: number; c: number } | null {
     for (let r = 0; r < board.length; r += 1) {
         for (let c = 0; c < board[r].length; c += 1) {
@@ -89,6 +144,7 @@ function findFirstPlayableCell(board: Board, preRevealed: boolean[][]): { r: num
 
 function App() {
     const initial = useMemo(() => {
+        // Priority 1: an in-progress saved game.
         const saved = loadState();
         if (saved) {
             return {
@@ -102,6 +158,24 @@ function App() {
                 showErrorsMode: saved.showErrorsMode,
             };
         }
+        // Priority 2: a shared puzzle in the URL hash.
+        if (typeof window !== 'undefined' && window.location.hash.length > 1) {
+            const code = window.location.hash.slice(1);
+            const snap = deserializePuzzle(code);
+            if (snap) {
+                return {
+                    difficulty: snap.difficulty,
+                    board: snap.board,
+                    preRevealed: snap.preRevealed,
+                    timer: 0,
+                    hintsUsed: 0,
+                    editDirection: 'h' as 'h' | 'v',
+                    pencilMode: false,
+                    showErrorsMode: true,
+                };
+            }
+        }
+        // Priority 3: a fresh puzzle at medium difficulty.
         const { board, preRevealed } = generatePuzzleWithPreRevealed('medium');
         return {
             difficulty: 'medium' as Difficulty,
@@ -134,6 +208,11 @@ function App() {
     const [showErrorsMode, setShowErrorsMode] = useState<boolean>(initial.showErrorsMode);
     const [showSolveConfirm, setShowSolveConfirm] = useState<boolean>(false);
     const [hintMessage, setHintMessage] = useState<string | null>(null);
+    const [showShareModal, setShowShareModal] = useState<boolean>(false);
+
+    // Lightweight ephemeral feedback ("Copied!", "Daily challenge loaded", …)
+    // shown as a transient toast. Independent of the modal stack.
+    const { toast, showToast } = useToast();
 
     // Stats
     const [timer, setTimer] = useState<number>(initial.timer);
@@ -202,8 +281,22 @@ function App() {
     }, [timerActive, isWon]);
 
     const startNewGame = useCallback(
-        (diff: Difficulty = difficulty) => {
-            const { board: newBoard, preRevealed: newPre } = generatePuzzleWithPreRevealed(diff);
+        (diff: Difficulty = difficulty, opts: { seed?: number; snapshot?: PuzzleSnapshot } = {}) => {
+            let newBoard: Board;
+            let newPre: boolean[][];
+            if (opts.snapshot) {
+                newBoard = opts.snapshot.board;
+                newPre = opts.snapshot.preRevealed;
+                setDifficulty(opts.snapshot.difficulty);
+            } else if (opts.seed !== undefined) {
+                const seeded = generateSeededPuzzle(opts.seed, diff);
+                newBoard = seeded.board;
+                newPre = seeded.preRevealed;
+            } else {
+                const fresh = generatePuzzleWithPreRevealed(diff);
+                newBoard = fresh.board;
+                newPre = fresh.preRevealed;
+            }
             setBoard(newBoard);
             setPreRevealed(newPre);
             setSelectedCell(findFirstPlayableCell(newBoard, newPre));
@@ -213,6 +306,8 @@ function App() {
             setUndoStack([]);
             setRedoStack([]);
             setIsWon(false);
+            // Invalidate any in-flight victory modal that hasn't fired yet.
+            winStillValidRef.current = false;
             setShowVictoryModal(false);
             setErrors([]);
             setConfetti([]);
@@ -229,6 +324,56 @@ function App() {
         },
         [startNewGame]
     );
+
+    /**
+     * Copy a shareable code for the current puzzle to the clipboard. The
+     * code is generated from the snapshot, not the live board, so a player
+     * halfway through can still hand the puzzle to a friend.
+     */
+    const handleShare = useCallback(() => {
+        const solution: number[][] = board.map(row =>
+            row.map(cell => (cell.type === 'white' ? cell.correctValue : 0))
+        );
+        const snapshot: PuzzleSnapshot = {
+            difficulty,
+            board: board.map(row =>
+                row.map(cell =>
+                    cell.type === 'white' ? { ...cell, value: '', notes: [] } : cell
+                )
+            ),
+            solution,
+            preRevealed,
+        };
+        const code = serializePuzzle(snapshot);
+        const fullUrl = `${window.location.origin}${window.location.pathname}#${code}`;
+        const copy = async () => {
+            try {
+                if (navigator.clipboard?.writeText) {
+                    await navigator.clipboard.writeText(fullUrl);
+                    showToast('Link copied to clipboard', 'success');
+                } else {
+                    // Fallback for older browsers: expose the code in the modal
+                    setShowShareModal(true);
+                }
+            } catch {
+                setShowShareModal(true);
+            }
+        };
+        void copy();
+    }, [board, difficulty, preRevealed, showToast]);
+
+    /**
+     * Load today's daily challenge. Two players opening the app on the same
+     * calendar day see the same puzzle (UTC date — fine for a fun feature,
+     * keeps the math simple).
+     */
+    const handleDailyChallenge = useCallback(() => {
+        const today = new Date();
+        const dayKey = `${today.getUTCFullYear()}-${today.getUTCMonth() + 1}-${today.getUTCDate()}`;
+        const seed = hashStringSeed(`kakuro:daily:${dayKey}`);
+        startNewGame(difficulty, { seed });
+        showToast(`Daily challenge loaded (${dayKey})`, 'info');
+    }, [difficulty, startNewGame, showToast]);
 
     const saveUndoState = useCallback((currentBoard: Board) => {
         setUndoStack(prev => {
@@ -269,8 +414,17 @@ function App() {
         playSound('clear');
     }, [redoStack, board, isWon, playSound]);
 
+    // Tracks whether a win is "live" — false after the user starts a new game
+    // mid-celebration, so the deferred victory modal doesn't pop up over a
+    // fresh, unsolved board. Read inside the triggerWin setTimeout. Mutated
+    // synchronously in handlers, not via an effect, so the lint rule for
+    // setState-in-effect does not fire.
+    const winStillValidRef = useRef(false);
+
     const triggerWin = useCallback(() => {
         setIsWon(true);
+        // eslint-disable-next-line react-hooks/immutability -- imperative flag for the deferred modal
+        winStillValidRef.current = true;
         setTimerActive(false);
         playSound('win');
 
@@ -292,16 +446,25 @@ function App() {
             setConfetti(particles);
         }
 
-        // Update best time + win count
+        // Read the latest timer and difficulty via refs so the win path
+        // stays stable and never fires twice.
+        const t = elapsedRef.current;
         setStats(prev => {
-            const next = recordWin(difficulty, timer, prev);
+            const next = recordWin(difficulty, t, prev);
             saveStats(next);
             return next;
         });
         clearState();
 
-        setTimeout(() => setShowVictoryModal(true), 600);
-    }, [playSound, difficulty, timer]);
+        setTimeout(() => {
+            // If the user started a new game during the confetti animation,
+            // the win is no longer current and we must not show the modal
+            // over the new, unsolved board.
+            if (winStillValidRef.current) {
+                setShowVictoryModal(true);
+            }
+        }, 600);
+    }, [playSound, difficulty]);
 
     const handleCellInput = useCallback(
         (val: number | '') => {
@@ -337,7 +500,10 @@ function App() {
             playSound(val === '' ? 'clear' : 'input');
 
             setBoard(prev => {
-                const next = prev.map((row, currR) =>
+                // Place the digit, then prune matching notes from the rest of
+                // its two runs. The notes the player scribbled are stale
+                // the moment another cell in the run takes a value.
+                const placed = prev.map((row, currR) =>
                     row.map((cellObj, currC) => {
                         if (currR === r && currC === c && cellObj.type === 'white') {
                             return { ...cellObj, value: val, notes: [] } as WhiteCell;
@@ -345,10 +511,14 @@ function App() {
                         return cellObj;
                     })
                 );
+                const next = val === '' ? placed : pruneNotesAfterPlacement(placed, r, c, val);
                 const winCheck = checkWinCondition(next);
                 setErrors(winCheck.errors);
                 if (winCheck.isWin) {
-                    setTimeout(() => triggerWin(), 10);
+                    // Defer the win until the next tick so React commits the
+                    // board state first; the win handler reads from refs/state
+                    // that need to be settled.
+                    setTimeout(() => triggerWin(), 0);
                 } else if (winCheck.errors.length > 0 && showErrorsMode) {
                     const isNewError = winCheck.errors.some(err => err.r === r && err.c === c);
                     if (isNewError) {
@@ -495,10 +665,10 @@ function App() {
                     return cellObj;
                 })
             );
-            setTimeout(() => triggerWin(), 50);
+            setTimeout(() => triggerWin(), 0);
             return next;
         });
-    }, [isWon, board, saveUndoState, playSound, triggerWin]);
+    }, [isWon, board, saveUndoState, triggerWin, playSound]);
 
     const runStatusByCell = useRunStatus(board, selectedCell);
 
@@ -516,11 +686,27 @@ function App() {
         if (r >= board.length || c >= board[0].length) return null;
         const hStatus = getRunStatus(board, r, c, 'h');
         const vStatus = getRunStatus(board, r, c, 'v');
+        const candidates = getCandidatesForCell(board, r, c);
         return {
             h: { ...hStatus, combos: getPartitionsCached(hStatus.targetSum, hStatus.count) },
             v: { ...vStatus, combos: getPartitionsCached(vStatus.targetSum, vStatus.count) },
+            candidates,
         };
     }, [board, selectedCell]);
+
+    // Live-region announcement derived from current state. The aria-live
+    // region re-renders whenever this string changes; identical content
+    // produces no announcement, so transient states are not noisy.
+    const announcement = useMemo(() => {
+        if (hintMessage) return hintMessage;
+        if (isWon) return 'Puzzle solved';
+        if (errors.length > 0) return 'Conflict in this run';
+        if (selectedCell) {
+            const status = getRunStatus(board, selectedCell.r, selectedCell.c, 'h');
+            if (status.isComplete) return 'Row complete';
+        }
+        return '';
+    }, [hintMessage, isWon, errors, selectedCell, board]);
 
     return (
         <div className="app-container">
@@ -541,6 +727,12 @@ function App() {
                 </div>
             )}
 
+            {/* Live region for screen-reader announcements of conflicts, run
+                completion, and win. Polite because none of this is urgent. */}
+            <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+                {announcement}
+            </div>
+
             {showRulesModal && <RulesModal onClose={() => setShowRulesModal(false)} />}
 
             {showSolveConfirm && (
@@ -555,6 +747,24 @@ function App() {
                         handleSolvePuzzle();
                     }}
                     onCancel={() => setShowSolveConfirm(false)}
+                />
+            )}
+
+            {showShareModal && (
+                <ShareModal
+                    url={`${typeof window !== 'undefined' ? window.location.origin + window.location.pathname : ''}#${serializePuzzle({
+                        difficulty,
+                        board: board.map(row =>
+                            row.map(cell =>
+                                cell.type === 'white' ? { ...cell, value: '', notes: [] } : cell
+                            )
+                        ),
+                        solution: board.map(row =>
+                            row.map(cell => (cell.type === 'white' ? cell.correctValue : 0))
+                        ),
+                        preRevealed,
+                    })}`}
+                    onClose={() => setShowShareModal(false)}
                 />
             )}
 
@@ -616,6 +826,8 @@ function App() {
                         hintDisabled={isWon}
                         onSolveRequest={() => setShowSolveConfirm(true)}
                         solveDisabled={isWon}
+                        onShare={handleShare}
+                        onDaily={handleDailyChallenge}
                     />
 
                     <GameBoard
@@ -659,6 +871,8 @@ function App() {
                     </a>
                 </p>
             </footer>
+
+            <Toast toast={toast} />
         </div>
     );
 }
