@@ -88,8 +88,8 @@ export function GameControls(props: GameControlsProps) {
             className="btn"
             onClick={props.onHint}
             disabled={props.hintDisabled}
-            title="Fill selected square with correct answer"
-            aria-label="Get hint for selected cell"
+            title="Explain the next logical step, or fill a forced cell"
+            aria-label="Get a hint"
           >
             <Lightbulb size={16} style={{ color: 'var(--color-warning)' }} />
             Get Hint

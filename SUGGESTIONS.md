@@ -158,6 +158,30 @@ Conflicts and completion are conveyed only visually (colour) and audibly. A
 polite live region announcing "row complete" or "conflict in this run" would
 help screen-reader users.
 
+✅ Partially addressed: hints now render into a polite `role="status"` live
+region alongside a visible banner.
+
+---
+
+## Added since the review
+
+### ✨ Smart hint system
+
+`getHint(board, preferred?)` in `kakuroEngine.ts` returns the most instructive
+next step, in preference order:
+
+1. **Forced cell** — an empty cell whose row and column partitions intersect
+   to exactly one legal digit. The hint fills it (undoable) and explains why.
+2. **Unique run combination** — a run whose clue admits only one digit set
+   given current fills (e.g. "Row 2 (sum 16) can only be {7 + 9}"). Explains
+   without filling, teaching the deduction.
+3. **Reveal fallback** — reveals the correct digit for the selected (or first
+   empty) cell when no cheap deduction exists.
+
+Candidate legality is computed exactly via partition enumeration per run
+(`partitionsContaining`), so hints never suggest a digit that contradicts any
+valid completion. Covered by unit tests plus an App integration test.
+
 ### 🟢 No license
 
 `package.json` is `private: true` with no license file. Worth settling before

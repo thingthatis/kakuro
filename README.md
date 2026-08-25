@@ -3,7 +3,8 @@
 A browser-based Kakuro puzzle game built with **React 19 + TypeScript + Vite**. The
 engine procedurally generates puzzles, validates solutions, and drives an
 interactive playing experience with undo/redo, pencil marks, sound effects, run
-highlighting, combination hints, and a victory celebration.
+highlighting, smart hints that explain their reasoning, and a victory
+celebration.
 
 ## Quick start
 
@@ -87,6 +88,30 @@ dependencies, which makes it straightforward to unit-test. It exports:
   construction and its invariant check.
 - `buildRunIndex(board)` — rebuilds the run lookup maps for a board that came
   from storage rather than fresh generation.
+- `getHint(board, preferred?)` — returns the most instructive next step
+  (see "Smart hints" below).
+
+## Smart hints
+
+The **Get Hint** button does not simply reveal an answer. It calls
+`getHint(board, preferred?)`, which scans the board and returns the most
+instructive step available, in preference order:
+
+1. **Forced cell** — an empty cell whose row and column partitions, computed
+   exactly from the clue and current fills, intersect to a single legal
+   digit. The hint fills it (undoable) and explains why: *"The cell at row 3,
+   column 4 has only one possible digit: 7."*
+2. **Unique run combination** — a run whose clue admits only one digit set
+   given the current fills. The deduction is explained without filling:
+   *"Row 2 (sum 16) can only be filled with {7 + 9}."*
+3. **Reveal fallback** — when no cheap deduction exists, the correct digit of
+   the selected (or first empty) cell is revealed instead.
+
+Candidate legality comes from enumerating valid partitions per run
+(`partitionsContaining`), so a hint never suggests a digit that contradicts
+any valid completion. Each hint increments the hints counter and is announced
+in a visible banner plus a polite `role="status"` live region for screen
+readers.
 
 ## Puzzle generation
 
@@ -137,6 +162,8 @@ tracked per difficulty under `kakuro:stats:v1`.
   with the game's own selection.
 - Modals set `aria-modal`, trap Tab focus, close on `Escape`, and restore focus
   to the previously focused element on unmount.
+- Hints are announced through a polite `role="status"` live region, mirroring
+  the visible hint banner.
 - All animation is disabled under `prefers-reduced-motion: reduce`, and the
   confetti particles are not even created.
 
