@@ -8,11 +8,42 @@ import {
   checkWinCondition,
   getRunStatus,
   computeClueStatuses,
+  getHint,
   type Board,
   type WhiteCell,
   type BlackCell,
 } from './kakuroEngine';
 import type { Difficulty } from './types';
+
+/**
+ * Builds a board from a layout spec: each entry is `B`, or a digit string
+ * `d` (given), `-` (empty). Clues are supplied separately as
+ * `{ r, c, right?, down? }`.
+ */
+function makeBoard(
+  rows: string[],
+  clues: { r: number; c: number; right?: number; down?: number }[]
+): Board {
+  const solution = rows.map(row =>
+    [...row].map(ch => (ch === 'B' ? 0 : ch === '-' ? -1 : parseInt(ch, 10)))
+  );
+  return rows.map((row, r) =>
+    [...row].map((ch, c): BlackCell | WhiteCell => {
+      if (ch === 'B') {
+        const clue = clues.find(k => k.r === r && k.c === c);
+        return { type: 'black', clueRight: clue?.right, clueDown: clue?.down };
+      }
+      const correct =
+        solution[r][c] > 0 ? solution[r][c] : ((r + c) % 9) + 1;
+      return {
+        type: 'white',
+        value: ch === '-' ? '' : correct,
+        correctValue: correct,
+        notes: [],
+      };
+    })
+  );
+}
 
 const DIFFICULTIES: Difficulty[] = ['easy', 'medium', 'hard'];
 
@@ -395,5 +426,72 @@ describe('computeClueStatuses', () => {
     const statuses = computeClueStatuses(board);
     // (0,0) is always a black corner with no clue.
     expect(statuses.has('0,0')).toBe(false);
+  });
+});
+
+describe('getHint', () => {
+  it('finds a cell with exactly one legal digit and reports its value', () => {
+    // Row run (1,0)->: cells (1,1),(1,2), sum 4, with (1,2) given as 3.
+    // Column run (0,1)|: cells (1,1),(2,1), sum 3.
+    // Cell (1,1): row forces 1; column allows {1,2}; intersection = {1}.
+    const board = makeBoard(
+      ['BBB', 'B-3', 'B--'],
+      [
+        { r: 1, c: 0, right: 4 },
+        { r: 0, c: 1, down: 3 },
+        { r: 0, c: 2, down: 17 },
+      ]
+    );
+    const hint = getHint(board);
+    expect(hint.kind).toBe('single');
+    expect(hint.cell).toEqual({ r: 1, c: 1 });
+    expect(hint.value).toBe(1);
+  });
+
+  it('explains a run whose clue admits only one combination', () => {
+    // Row run of 2 cells summing to 16 => only {7,9}. Columns stay loose
+    // enough that no single cell is forced yet.
+    const board = makeBoard(
+      ['BBB', 'B--', 'B--'],
+      [
+        { r: 1, c: 0, right: 16 },
+        { r: 0, c: 1, down: 15 },
+        { r: 0, c: 2, down: 15 },
+      ]
+    );
+    const hint = getHint(board);
+    expect(hint.kind).toBe('run-unique');
+    expect(hint.message).toContain('{7 + 9}');
+  });
+
+  it('falls back to revealing the preferred cell', () => {
+    const board = makeBoard(
+      ['BBB', 'B--', 'B--'],
+      [
+        { r: 1, c: 0, right: 8 },
+        { r: 0, c: 1, down: 8 },
+        { r: 0, c: 2, down: 8 },
+      ]
+    );
+    (board[1][1] as WhiteCell).correctValue = 6;
+    const hint = getHint(board, { r: 1, c: 1 });
+    expect(hint.kind).toBe('reveal');
+    expect(hint.value).toBe(6);
+    expect(hint.cell).toEqual({ r: 1, c: 1 });
+  });
+
+  it('never suggests a digit already present in either run', () => {
+    const board = makeBoard(
+      ['BBB', 'B5-', 'B--'],
+      [
+        { r: 1, c: 0, right: 12 },
+        { r: 0, c: 1, down: 13 },
+        { r: 0, c: 2, down: 9 },
+      ]
+    );
+    const hint = getHint(board);
+    if (hint.kind === 'single') {
+      expect(hint.value).not.toBe(5);
+    }
   });
 });

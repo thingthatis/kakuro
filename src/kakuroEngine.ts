@@ -649,6 +649,200 @@ export function countSolutions(
   return exhausted ? CAP : found;
 }
 
+export interface Hint {
+  /**
+   * - `single`: an empty cell has exactly one legal digit; `value` is that
+   *   digit and filling it is provably safe.
+   * - `run-unique`: a run's clue admits only one digit combination given
+   *   the current fills. Explains the deduction but fills nothing.
+   * - `reveal`: no cheap deduction was found; falls back to revealing the
+   *   correct digit for the preferred (or first empty) cell.
+   */
+  kind: 'single' | 'run-unique' | 'reveal';
+  message: string;
+  cell?: { r: number; c: number };
+  value?: number;
+}
+
+function collectRuns(board: Board): { direction: Direction; clueR: number; clueC: number; target: number; coords: Coord[] }[] {
+  const runs: ReturnType<typeof collectRuns> = [];
+  const h = board.length;
+  const w = board[0].length;
+
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < w; c++) {
+      const cell = board[r][c];
+      if (cell.type !== 'black') continue;
+      if (cell.clueRight !== undefined && c + 1 < w) {
+        const { runCoords } = locateRun(board, r, c + 1, 'h');
+        if (runCoords.length > 0) {
+          runs.push({ direction: 'h', clueR: r, clueC: c, target: cell.clueRight, coords: runCoords });
+        }
+      }
+      if (cell.clueDown !== undefined && r + 1 < h) {
+        const { runCoords } = locateRun(board, r + 1, c, 'v');
+        if (runCoords.length > 0) {
+          runs.push({ direction: 'v', clueR: r, clueC: c, target: cell.clueDown, coords: runCoords });
+        }
+      }
+    }
+  }
+  return runs;
+}
+
+/** Enumerates every set of `count` distinct digits from 1-9 containing every entry of `mustInclude`. */
+function partitionsContaining(count: number, target: number, mustInclude: number[]): number[][] | null {
+  if (count < mustInclude.length || count > 9) return null;
+  const fixed = [...new Set(mustInclude)].sort((a, b) => a - b);
+  if (fixed.length !== mustInclude.length || fixed.length > count) return null;
+  const baseSum = fixed.reduce((s, v) => s + v, 0);
+  if (baseSum > target) return null;
+
+  const freeSlots = count - fixed.length;
+  const others: number[] = [];
+  for (let d = 1; d <= 9; d++) if (!fixed.includes(d)) others.push(d);
+
+  const results: number[][] = [];
+  const collect = (startIdx: number, slots: number, sum: number, prefix: number[]): void => {
+    if (slots === 0) {
+      if (sum + baseSum === target) results.push([...prefix, ...fixed].sort((a, b) => a - b));
+      return;
+    }
+    for (let i = startIdx; i < others.length; i++) {
+      const d = others[i];
+      // Prune when even the smallest completions overshoot.
+      if (sum + d + baseSum + ((slots - 1) * slots) / 2 > target) break;
+      prefix.push(d);
+      collect(i + 1, slots - 1, sum + d, prefix);
+      prefix.pop();
+    }
+  };
+
+  collect(0, freeSlots, 0, []);
+  return results;
+}
+
+/**
+ * Finds the most instructive next step for the player.
+ *
+ * Preference order: a forced cell (only one legal digit fits both of its
+ * runs) beats a uniquely-determined run combination, which beats revealing
+ * the answer outright. The point is to teach *why*, not to play for you.
+ */
+export function getHint(board: Board, preferred?: { r: number; c: number }): Hint {
+  const runs = collectRuns(board);
+
+  // Per-empty-cell candidate sets: a digit is legal if it does not clash
+  // with either run's existing digits and leaves both runs completable.
+  const empties: Coord[] = [];
+  for (let r = 0; r < board.length; r++) {
+    for (let c = 0; c < board[0].length; c++) {
+      if (board[r][c].type === 'white' && (board[r][c] as WhiteCell).value === '') {
+        empties.push({ r, c });
+      }
+    }
+  }
+
+  const runsOf = new Map<string, typeof runs>();
+  for (const run of runs) {
+    for (const coord of run.coords) {
+      const key = `${coord.r},${coord.c}`;
+      const list = runsOf.get(key) || [];
+      list.push(run);
+      runsOf.set(key, list);
+    }
+  }
+
+  let bestSingle: { coord: Coord; digit: number } | null = null;
+  for (const coord of empties) {
+    const cellRuns = runsOf.get(`${coord.r},${coord.c}`) || [];
+    // A digit is legal for this cell iff it appears in some valid partition
+    // of every one of its runs. Partition sets are tiny (runs hold at most
+    // 9 distinct digits), so enumerating them outright is cheap and exact.
+    let candidates: number[] | null = null;
+    for (const run of cellRuns) {
+      const filled: number[] = [];
+      for (const rc of run.coords) {
+        const v = (board[rc.r][rc.c] as WhiteCell).value;
+        if (v !== '') filled.push(v);
+      }
+      const combos = partitionsContaining(run.coords.length, run.target, filled);
+      const allowed = new Set<number>();
+      if (combos) {
+        for (const combo of combos) {
+          for (const d of combo) {
+            if (!filled.includes(d)) allowed.add(d);
+          }
+        }
+      }
+      if (candidates === null) {
+        candidates = [...allowed];
+      } else {
+        candidates = candidates.filter(d => allowed.has(d));
+      }
+    }
+    if (candidates && candidates.length === 1) {
+      bestSingle = { coord, digit: candidates[0] };
+      if (preferred && preferred.r === coord.r && preferred.c === coord.c) break;
+    }
+  }
+
+  if (bestSingle) {
+    return {
+      kind: 'single',
+      message: `The cell at row ${bestSingle.coord.r + 1}, column ${bestSingle.coord.c + 1} has only one possible digit: ${bestSingle.digit}.`,
+      cell: { r: bestSingle.coord.r, c: bestSingle.coord.c },
+      value: bestSingle.digit,
+    };
+  }
+
+  // Look for a run whose remaining possibilities collapse to one combination.
+  let bestRun: { run: (typeof runs)[number]; combo: number[]; emptyCount: number } | null = null;
+  for (const run of runs) {
+    const filled: number[] = [];
+    let emptyCount = 0;
+    for (const rc of run.coords) {
+      const v = (board[rc.r][rc.c] as WhiteCell).value;
+      if (v === '') emptyCount++;
+      else filled.push(v);
+    }
+    if (emptyCount === 0) continue;
+    const combos = partitionsContaining(run.coords.length, run.target, filled);
+    if (combos && combos.length === 1) {
+      if (!bestRun || emptyCount < bestRun.emptyCount) {
+        bestRun = { run, combo: combos[0], emptyCount };
+      }
+    }
+  }
+
+  if (bestRun) {
+    const dirWord = bestRun.run.direction === 'h' ? 'Row' : 'Column';
+    const line = bestRun.run.direction === 'h' ? bestRun.run.clueR : bestRun.run.clueC;
+    const comboStr = bestRun.combo.join(' + ');
+    return {
+      kind: 'run-unique',
+      message: `${dirWord} ${line + 1} (sum ${bestRun.run.target}) can only be filled with {${comboStr}}.`,
+    };
+  }
+
+  // Fallback: reveal the answer for the preferred cell, else the first empty.
+  const target =
+    (preferred && board[preferred.r]?.[preferred.c]?.type === 'white' &&
+      (board[preferred.r][preferred.c] as WhiteCell).value === ''
+      ? preferred
+      : empties[0]) || null;
+  if (!target) {
+    return { kind: 'reveal', message: 'No empty cells left to hint.' };
+  }
+  const value = (board[target.r][target.c] as WhiteCell).correctValue;
+  return {
+    kind: 'reveal',
+    message: `The cell at row ${target.r + 1}, column ${target.c + 1} is ${value}.`,
+    cell: { r: target.r, c: target.c },
+    value,
+  };
+}
+
 /**
  * Rebuilds the run lookup maps for an existing board. Needed to call
  * `countSolutions` on a board that came from storage rather than fresh

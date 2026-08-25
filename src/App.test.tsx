@@ -38,8 +38,23 @@ describe('App integration', () => {
     expect(empty.querySelector('.cell-value')?.textContent).toBe('5');
   });
 
-  it('undo reverts a digit entry', async () => {
+  it('hint button explains or fills a cell and shows an announcement', async () => {
     const user = userEvent.setup();
+    render(<App />);
+
+    const hintBtn = screen.getByRole('button', { name: /get a hint/i });
+    expect(hintBtn).toBeTruthy();
+    await user.click(hintBtn);
+
+    const banner = document.querySelector('.hint-banner');
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent?.length ?? 0).toBeGreaterThan(0);
+
+    // The live region mirrors the hint for screen readers.
+    expect(screen.getByRole('status')?.textContent).toBe(banner?.querySelector('span')?.textContent);
+  });
+
+  it('undo reverts a digit entry', async () => {    const user = userEvent.setup();
     render(<App />);
     const empty = Array.from(document.querySelectorAll('.cell-white')).find(
       el => !el.classList.contains('pre-revealed') && el.querySelector('.notes-container')

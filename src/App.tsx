@@ -4,6 +4,7 @@ import {
     checkWinCondition,
     getRunStatus,
     computeClueStatuses,
+    getHint,
 } from './kakuroEngine';
 import type { Board, WhiteCell } from './kakuroEngine';
 import type { Difficulty } from './types';
@@ -132,6 +133,7 @@ function App() {
     const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
     const [showErrorsMode, setShowErrorsMode] = useState<boolean>(initial.showErrorsMode);
     const [showSolveConfirm, setShowSolveConfirm] = useState<boolean>(false);
+    const [hintMessage, setHintMessage] = useState<string | null>(null);
 
     // Stats
     const [timer, setTimer] = useState<number>(initial.timer);
@@ -214,6 +216,7 @@ function App() {
             setShowVictoryModal(false);
             setErrors([]);
             setConfetti([]);
+            setHintMessage(null);
             clearState();
         },
         [difficulty]
@@ -449,31 +452,35 @@ function App() {
     );
 
     const handleHint = useCallback(() => {
-        if (!selectedCell || isWon) return;
-        const { r, c } = selectedCell;
-        const cell = board[r][c];
-        if (cell.type !== 'white' || preRevealed[r]?.[c]) return;
-        if (cell.value === cell.correctValue) return;
-
-        saveUndoState(board);
+        if (isWon) return;
+        const hint = getHint(board, selectedCell ?? undefined);
         setHintsUsed(h => h + 1);
         playSound('hint');
+        setHintMessage(hint.message);
 
-        setBoard(prev => {
-            const next = prev.map((row, currR) =>
-                row.map((cellObj, currC) => {
-                    if (currR === r && currC === c && cellObj.type === 'white') {
-                        return { ...cellObj, value: cellObj.correctValue, notes: [] } as WhiteCell;
-                    }
-                    return cellObj;
-                })
-            );
-            const winCheck = checkWinCondition(next);
-            setErrors(winCheck.errors);
-            if (winCheck.isWin) setTimeout(() => triggerWin(), 10);
-            return next;
-        });
-    }, [selectedCell, isWon, board, preRevealed, saveUndoState, playSound, triggerWin]);
+        if ((hint.kind === 'single' || hint.kind === 'reveal') && hint.cell && hint.value) {
+            const { r, c } = hint.cell;
+            const cell = board[r][c];
+            if (cell.type !== 'white' || preRevealed[r]?.[c] || cell.value === hint.value) return;
+
+            saveUndoState(board);
+            setSelectedCell({ r, c });
+            setBoard(prev => {
+                const next = prev.map((row, currR) =>
+                    row.map((cellObj, currC) => {
+                        if (currR === r && currC === c && cellObj.type === 'white') {
+                            return { ...cellObj, value: cellObj.correctValue, notes: [] } as WhiteCell;
+                        }
+                        return cellObj;
+                    })
+                );
+                const winCheck = checkWinCondition(next);
+                setErrors(winCheck.errors);
+                if (winCheck.isWin) setTimeout(() => triggerWin(), 10);
+                return next;
+            });
+        }
+    }, [isWon, board, selectedCell, preRevealed, saveUndoState, playSound, triggerWin]);
 
     const handleSolvePuzzle = useCallback(() => {
         if (isWon) return;
@@ -571,6 +578,22 @@ function App() {
                 onShowRules={() => setShowRulesModal(true)}
             />
 
+            <div className="sr-only" role="status" aria-live="polite">
+                {hintMessage ?? ''}
+            </div>
+            {hintMessage && (
+                <div className="hint-banner" role="note">
+                    <span>{hintMessage}</span>
+                    <button
+                        className="btn btn-icon"
+                        aria-label="Dismiss hint"
+                        onClick={() => setHintMessage(null)}
+                    >
+                        ×
+                    </button>
+                </div>
+            )}
+
             <main className="main-content">
                 <section className="game-panel">
                     <GameControls
@@ -590,7 +613,7 @@ function App() {
                         onToggleErrors={() => setShowErrorsMode(e => !e)}
                         showErrors={showErrorsMode}
                         onHint={handleHint}
-                        hintDisabled={!selectedCell || isWon || (selectedCell ? preRevealed[selectedCell.r]?.[selectedCell.c] : false)}
+                        hintDisabled={isWon}
                         onSolveRequest={() => setShowSolveConfirm(true)}
                         solveDisabled={isWon}
                     />
