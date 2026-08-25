@@ -458,7 +458,7 @@ function App() {
         playSound('hint');
         setHintMessage(hint.message);
 
-        if ((hint.kind === 'single' || hint.kind === 'reveal') && hint.cell && hint.value) {
+        if ((hint.kind === 'single' || hint.kind === 'reveal') && hint.cell && hint.value !== undefined) {
             const { r, c } = hint.cell;
             const cell = board[r][c];
             if (cell.type !== 'white' || preRevealed[r]?.[c] || cell.value === hint.value) return;
@@ -469,7 +469,7 @@ function App() {
                 const next = prev.map((row, currR) =>
                     row.map((cellObj, currC) => {
                         if (currR === r && currC === c && cellObj.type === 'white') {
-                            return { ...cellObj, value: cellObj.correctValue, notes: [] } as WhiteCell;
+                            return { ...cellObj, value: hint.value, notes: [] } as WhiteCell;
                         }
                         return cellObj;
                     })

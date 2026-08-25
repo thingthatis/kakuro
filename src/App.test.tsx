@@ -54,7 +54,8 @@ describe('App integration', () => {
     expect(screen.getByRole('status')?.textContent).toBe(banner?.querySelector('span')?.textContent);
   });
 
-  it('undo reverts a digit entry', async () => {    const user = userEvent.setup();
+  it('undo reverts a digit entry', async () => {
+    const user = userEvent.setup();
     render(<App />);
     const empty = Array.from(document.querySelectorAll('.cell-white')).find(
       el => !el.classList.contains('pre-revealed') && el.querySelector('.notes-container')
